@@ -177,60 +177,60 @@ export default function GasRecolhimento() {
     }
   }
 
-const registrarGas = async () => {
-  setConfirmarRegistro(false)
-  setProcessando(true)
-  setError(null)
+  const registrarGas = async () => {
+    setConfirmarRegistro(false)
+    setProcessando(true)
+    setError(null)
 
-  try {
-    const quantidade = Number(gasRetirado)
-    const novoAcumulado = acumulado + quantidade
+    try {
+      const quantidade = Number(gasRetirado)
+      const novoAcumulado = acumulado + quantidade
 
-    const novaEntrada: EntradaGas = {
-      id: Date.now().toString(),
-      quantidade,
-      acumulado: novoAcumulado,
-      rodada,
-      operador: operador.trim(),
-      data: new Date().toISOString(),
+      const novaEntrada: EntradaGas = {
+        id: Date.now().toString(),
+        quantidade,
+        acumulado: novoAcumulado,
+        rodada,
+        operador: operador.trim(),
+        data: new Date().toISOString(),
+      }
+
+      const novoEstado = {
+        acumulado: novoAcumulado,
+        rodada,
+        historico: [novaEntrada, ...historico],
+      }
+
+      // Atualiza visualmente na hora
+      setAcumulado(novoAcumulado)
+      setRodada(rodada)
+      setHistorico([novaEntrada, ...historico])
+      setUltimaSincronizacao(new Date().toISOString())
+
+      // Salva no servidor em background
+      memoryStorageService.salvar(novoEstado)
+        .then(() => {
+          setStatusConexao("online")
+        })
+        .catch((error) => {
+          console.error("Erro ao salvar no servidor:", error)
+          memoryStorageService.saveToLocalStorage(novoEstado)
+          setStatusConexao("local")
+          setError(
+            "Dados salvos apenas localmente. Sincronize quando estiver online para compartilhar com outros usuários."
+          )
+        })
+
+      setGasRetirado("")
+    } catch (error) {
+      console.error("Erro ao registrar gás:", error)
+      setError(
+        "Erro interno ao tentar registrar a entrada. Tente novamente."
+      )
+    } finally {
+      setProcessando(false)
     }
-
-    const novoEstado = {
-      acumulado: novoAcumulado,
-      rodada,
-      historico: [novaEntrada, ...historico],
-    }
-
-    // Atualiza visualmente na hora
-    setAcumulado(novoAcumulado)
-    setRodada(rodada)
-    setHistorico([novaEntrada, ...historico])
-    setUltimaSincronizacao(new Date().toISOString())
-
-    // Salva no servidor em background
-    memoryStorageService.salvar(novoEstado)
-      .then(() => {
-        setStatusConexao("online")
-      })
-      .catch((error) => {
-        console.error("Erro ao salvar no servidor:", error)
-        memoryStorageService.saveToLocalStorage(novoEstado)
-        setStatusConexao("local")
-        setError(
-          "Dados salvos apenas localmente. Sincronize quando estiver online para compartilhar com outros usuários."
-        )
-      })
-
-    setGasRetirado("")
-  } catch (error) {
-    console.error("Erro ao registrar gás:", error)
-    setError(
-      "Erro interno ao tentar registrar a entrada. Tente novamente."
-    )
-  } finally {
-    setProcessando(false)
   }
-}
 
   const trocarCilindro = async () => {
     setConfirmarTrocaCilindro(false)
@@ -238,59 +238,48 @@ const registrarGas = async () => {
     setError(null)
 
     try {
-      // Get current data (either from API or localStorage)
-      let dadosAtuais
-      try {
-        dadosAtuais = await memoryStorageService.carregar()
-      } catch (error) {
-        // If API fails, use local data
-        dadosAtuais = memoryStorageService.loadFromLocalStorage()
-        setStatusConexao("local")
-      }
+      const novaRodada = rodada + 1
 
-      // Create new entry for cylinder change
       const novaEntrada: EntradaGas = {
         id: Date.now().toString(),
         quantidade: 0,
         acumulado: 0,
-        rodada: dadosAtuais.rodada + 1,
+        rodada: novaRodada,
         data: new Date().toISOString(),
         operador: operador.trim(),
-        valorFinalRodada: dadosAtuais.acumulado,
+        valorFinalRodada: acumulado,
         trocaCilindro: true,
       }
 
-      // Update state
-      const novoHistorico = [novaEntrada, ...dadosAtuais.historico]
       const novoEstado = {
         acumulado: 0,
-        rodada: dadosAtuais.rodada + 1,
-        historico: novoHistorico,
+        rodada: novaRodada,
+        historico: [novaEntrada, ...historico],
       }
 
-      // Try to save to API
-      try {
-        await memoryStorageService.salvar(novoEstado)
-        setStatusConexao("online")
-      } catch (error) {
-        // If API fails, save locally
-        memoryStorageService.saveToLocalStorage(novoEstado)
-        setStatusConexao("local")
-        setError(
-          "Troca de cilindro salva apenas localmente. Sincronize quando estiver online para compartilhar com outros usuários.",
-        )
-      }
-
-      // Update local state
+      // Atualiza instantaneamente
       setAcumulado(0)
-      setRodada(novoEstado.rodada)
-      setHistorico(novoHistorico)
+      setRodada(novaRodada)
+      setHistorico([novaEntrada, ...historico])
       setUltimaSincronizacao(new Date().toISOString())
+
+      // Salva no servidor em segundo plano
+      memoryStorageService.salvar(novoEstado)
+        .then(() => {
+          setStatusConexao("online")
+        })
+        .catch((error) => {
+          console.error("Erro ao salvar no servidor:", error)
+          memoryStorageService.saveToLocalStorage(novoEstado)
+          setStatusConexao("local")
+          setError(
+            "Troca de cilindro salva apenas localmente. Sincronize quando estiver online para compartilhar com outros usuários."
+          )
+        })
+
     } catch (error) {
       console.error("Erro ao trocar cilindro:", error)
-      setError(
-        "Troca de cilindro salva apenas localmente. Sincronize quando estiver online para compartilhar com outros usuários.",
-      )
+      setError("Erro interno ao tentar trocar o cilindro. Tente novamente.")
     } finally {
       setProcessando(false)
     }
@@ -302,72 +291,58 @@ const registrarGas = async () => {
     setError(null)
 
     try {
-      // Get current data (either from API or localStorage)
-      let dadosAtuais
-      try {
-        dadosAtuais = await memoryStorageService.carregar()
-      } catch (error) {
-        // If API fails, use local data
-        dadosAtuais = memoryStorageService.loadFromLocalStorage()
-        setStatusConexao("local")
-      }
-
-      if (dadosAtuais.historico.length === 0) {
+      if (historico.length === 0) {
         throw new Error("Não há entradas para desfazer")
       }
 
-      // Remove the last entry
-      const ultimaEntrada = dadosAtuais.historico[0]
-      const novoHistorico = [...dadosAtuais.historico]
+      const ultimaEntrada = historico[0]
+      const novoHistorico = [...historico]
       novoHistorico.shift()
 
-      // Calculate new accumulated and round
-      let novoAcumulado = dadosAtuais.acumulado
-      let novaRodada = dadosAtuais.rodada
+      let novoAcumulado = acumulado
+      let novaRodada = rodada
 
-      // If the last record was a cylinder change
       if (ultimaEntrada.trocaCilindro) {
         novaRodada = novaRodada - 1
         novoAcumulado = ultimaEntrada.valorFinalRodada || 0
-      }
-      // If the last record caused a round change
-      else if (ultimaEntrada.valorFinalRodada) {
+      } else if (ultimaEntrada.valorFinalRodada) {
         novaRodada = novaRodada - 1
-        novoAcumulado = ultimaEntrada.valorFinalRodada - ultimaEntrada.quantidade
+        novoAcumulado = (ultimaEntrada.valorFinalRodada || 0) - (ultimaEntrada.quantidade || 0)
       } else {
-        novoAcumulado = novoAcumulado - ultimaEntrada.quantidade
+        novoAcumulado = novoAcumulado - (ultimaEntrada.quantidade || 0)
       }
 
-      // Update state
       const novoEstado = {
         acumulado: novoAcumulado,
         rodada: novaRodada,
         historico: novoHistorico,
       }
 
-      // Try to save to API
-      try {
-        await memoryStorageService.salvar(novoEstado)
-        setStatusConexao("online")
-      } catch (error) {
-        // If API fails, save locally
-        memoryStorageService.saveToLocalStorage(novoEstado)
-        setStatusConexao("local")
-        setError(
-          "Operação de desfazer salva apenas localmente. Sincronize quando estiver online para compartilhar com outros usuários.",
-        )
-      }
-
-      // Update local state
+      // Atualiza instantaneamente
       setAcumulado(novoAcumulado)
       setRodada(novaRodada)
       setHistorico(novoHistorico)
       setUltimaSincronizacao(new Date().toISOString())
+
+      // Salva no servidor em segundo plano
+      memoryStorageService.salvar(novoEstado)
+        .then(() => {
+          setStatusConexao("online")
+        })
+        .catch((error) => {
+          console.error("Erro ao salvar no servidor:", error)
+          memoryStorageService.saveToLocalStorage(novoEstado)
+          setStatusConexao("local")
+          setError(
+            "Operação de desfazer salva apenas localmente. Sincronize quando estiver online para compartilhar com outros usuários."
+          )
+        })
+
     } catch (error) {
       console.error("Erro ao desfazer registro:", error)
       setError(
         "Não foi possível desfazer o último registro. " +
-          (error instanceof Error ? error.message : "Por favor, tente novamente."),
+        (error instanceof Error ? error.message : "Por favor, tente novamente."),
       )
     } finally {
       setProcessando(false)
