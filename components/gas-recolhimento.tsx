@@ -177,83 +177,60 @@ export default function GasRecolhimento() {
     }
   }
 
-  const registrarGas = async () => {
-    setConfirmarRegistro(false)
-    setProcessando(true)
-    setError(null)
+const registrarGas = async () => {
+  setConfirmarRegistro(false)
+  setProcessando(true)
+  setError(null)
 
-    try {
-      // Get current data (either from API or localStorage)
-      let dadosAtuais
-      try {
-        dadosAtuais = await memoryStorageService.carregar()
-      } catch (error) {
-        // If API fails, use local data
-        dadosAtuais = memoryStorageService.loadFromLocalStorage()
-        setStatusConexao("local")
-      }
+  try {
+    const quantidade = Number(gasRetirado)
+    const novoAcumulado = acumulado + quantidade
 
-      const quantidade = Number(gasRetirado)
-      const novoAcumulado = dadosAtuais.acumulado + quantidade
+    const novaEntrada: EntradaGas = {
+      id: Date.now().toString(),
+      quantidade,
+      acumulado: novoAcumulado,
+      rodada,
+      operador: operador.trim(),
+      data: new Date().toISOString(),
+    }
 
-      // Create new entry for history
-      const novaEntrada: EntradaGas = {
-        id: Date.now().toString(),
-        quantidade,
-        acumulado: novoAcumulado,
-        rodada: dadosAtuais.rodada,
-        operador: operador.trim(),
-        data: new Date().toISOString(),
-      }
+    const novoEstado = {
+      acumulado: novoAcumulado,
+      rodada,
+      historico: [novaEntrada, ...historico],
+    }
 
-      console.log("Registrando nova entrada")
+    // Atualiza visualmente na hora
+    setAcumulado(novoAcumulado)
+    setRodada(rodada)
+    setHistorico([novaEntrada, ...historico])
+    setUltimaSincronizacao(new Date().toISOString())
 
-      // Try to save to API
-      try {
-        const novoEstado = {
-          acumulado: novoAcumulado,
-          rodada: dadosAtuais.rodada,
-          historico: [novaEntrada, ...dadosAtuais.historico],
-        }
-
-        await memoryStorageService.salvar(novoEstado)
+    // Salva no servidor em background
+    memoryStorageService.salvar(novoEstado)
+      .then(() => {
         setStatusConexao("online")
-
-        // Update local state
-        setAcumulado(novoAcumulado)
-        setRodada(dadosAtuais.rodada)
-        setHistorico([novaEntrada, ...dadosAtuais.historico])
-      } catch (error) {
-        // If API fails, save locally
-        const novoEstado = {
-          acumulado: novoAcumulado,
-          rodada: dadosAtuais.rodada,
-          historico: [novaEntrada, ...dadosAtuais.historico],
-        }
-
+      })
+      .catch((error) => {
+        console.error("Erro ao salvar no servidor:", error)
         memoryStorageService.saveToLocalStorage(novoEstado)
         setStatusConexao("local")
         setError(
-          "Dados salvos apenas localmente. Sincronize quando estiver online para compartilhar com outros usuários.",
+          "Dados salvos apenas localmente. Sincronize quando estiver online para compartilhar com outros usuários."
         )
+      })
 
-        // Update local state
-        setAcumulado(novoAcumulado)
-        setRodada(dadosAtuais.rodada)
-        setHistorico([novaEntrada, ...dadosAtuais.historico])
-      }
-
-      setGasRetirado("")
-      setUltimaSincronizacao(new Date().toISOString())
-    } catch (error) {
-      console.error("Erro ao registrar gás:", error)
-      setError(
-        "Entrada registrada apenas localmente. Sincronize quando estiver online para compartilhar com outros usuários.",
-      )
-    } finally {
-      setProcessando(false)
-    }
+    setGasRetirado("")
+  } catch (error) {
+    console.error("Erro ao registrar gás:", error)
+    setError(
+      "Erro interno ao tentar registrar a entrada. Tente novamente."
+    )
+  } finally {
+    setProcessando(false)
   }
+}
 
   const trocarCilindro = async () => {
     setConfirmarTrocaCilindro(false)
