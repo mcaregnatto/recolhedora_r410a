@@ -22,7 +22,9 @@ import {
 import { AlertTriangle, RotateCcw, RefreshCw, Loader2, Download, Clock } from "lucide-react"
 import { memoryStorageService } from "@/lib/memory-storage-service"
 import type { EntradaGas } from "@/lib/types"
-import { v4 as uuidv4 } from 'uuid'
+
+// Verificar se estamos no navegador
+const isBrowser = typeof window !== "undefined"
 
 export default function GasRecolhimento() {
   const [gasRetirado, setGasRetirado] = useState<string>("")
@@ -42,38 +44,59 @@ export default function GasRecolhimento() {
   const [confirmarDesfazer, setConfirmarDesfazer] = useState<boolean>(false)
   const [pendingOperations, setPendingOperations] = useState<number>(0)
 
-  // Fila de sincronização
-  const syncQueue: { id: string; operation: any }[] = JSON.parse(localStorage.getItem('syncQueue') || '[]')
+  // Função para obter a fila de sincronização
+  const getSyncQueue = useCallback(() => {
+    if (!isBrowser) return []
+    try {
+      return JSON.parse(localStorage.getItem("syncQueue") || "[]")
+    } catch (e) {
+      console.error("Erro ao ler fila de sincronização:", e)
+      return []
+    }
+  }, [])
 
   // Função para adicionar operação à fila
   const addToQueue = useCallback((operation: any) => {
-    const operationId = uuidv4()
-    syncQueue.push({ id: operationId, operation })
-    localStorage.setItem('syncQueue', JSON.stringify(syncQueue))
-    setPendingOperations(syncQueue.length)
-    processQueue()
+    if (!isBrowser) return
+
+    try {
+      const syncQueue = getSyncQueue()
+      const operationId = Date.now().toString()
+      syncQueue.push({ id: operationId, operation })
+      localStorage.setItem("syncQueue", JSON.stringify(syncQueue))
+      setPendingOperations(syncQueue.length)
+      processQueue()
+    } catch (e) {
+      console.error("Erro ao adicionar à fila:", e)
+    }
   }, [])
 
   // Função para processar a fila com exponential backoff
   const processQueue = useCallback(async () => {
-    if (!navigator.onLine || syncQueue.length === 0 || sincronizando) return
+    if (!isBrowser || !navigator.onLine || sincronizando) return
+
+    const syncQueue = getSyncQueue()
+    if (syncQueue.length === 0) return
 
     setSincronizando(true)
     const operation = syncQueue[0]
 
     try {
       await memoryStorageService.salvar(operation.operation)
+
+      // Remover da fila após sucesso
       syncQueue.shift()
-      localStorage.setItem('syncQueue', JSON.stringify(syncQueue))
+      localStorage.setItem("syncQueue", JSON.stringify(syncQueue))
       setPendingOperations(syncQueue.length)
       setUltimaSincronizacao(new Date().toISOString())
       setStatusConexao("online")
+
       // Processar próxima operação
       if (syncQueue.length > 0) {
         setTimeout(processQueue, 100) // Pequeno atraso para evitar sobrecarga
       }
     } catch (error) {
-      console.error('Erro ao sincronizar:', error)
+      console.error("Erro ao sincronizar:", error)
       setStatusConexao("local")
       setError("Dados salvos localmente. Sincronizando quando possível.")
       // Exponential backoff: espera 5s, 10s, 20s, etc.
@@ -81,10 +104,12 @@ export default function GasRecolhimento() {
     } finally {
       setSincronizando(false)
     }
-  }, [sincronizando])
+  }, [sincronizando, getSyncQueue])
 
   // Monitorar status de conexão
   useEffect(() => {
+    if (!isBrowser) return
+
     const handleOnline = () => {
       setStatusConexao("online")
       processQueue()
@@ -112,7 +137,9 @@ export default function GasRecolhimento() {
       setAcumulado(localData.acumulado)
       setRodada(localData.rodada)
       setHistorico(localData.historico)
-      setPendingOperations(syncQueue.length)
+      if (isBrowser) {
+        setPendingOperations(getSyncQueue().length)
+      }
     }
 
     // Buscar do servidor em segundo plano
@@ -123,7 +150,9 @@ export default function GasRecolhimento() {
         setRodada(dados.rodada)
         setHistorico(dados.historico)
         setUltimaSincronizacao(new Date().toISOString())
-        memoryStorageService.saveToLocalStorage(dados)
+        if (isBrowser) {
+          memoryStorageService.saveToLocalStorage(dados)
+        }
         setStatusConexao("online")
       } else {
         throw new Error("Dados inválidos recebidos")
@@ -135,14 +164,14 @@ export default function GasRecolhimento() {
     } finally {
       setCarregando(false)
     }
-  }, [])
+  }, [getSyncQueue])
 
   // Carregar dados ao iniciar
   useEffect(() => {
     carregarDados()
 
     // Disparar sincronização após alterações no estado
-    if (navigator.onLine && !sincronizando) {
+    if (isBrowser && navigator.onLine && !sincronizando) {
       processQueue()
     }
   }, [carregarDados, processQueue, sincronizando])
@@ -198,7 +227,10 @@ export default function GasRecolhimento() {
       }
 
       // Salvar localmente primeiro
-      memoryStorageService.saveToLocalStorage(novoEstado)
+      if (isBrowser) {
+        memoryStorageService.saveToLocalStorage(novoEstado)
+      }
+
       setAcumulado(novoEstado.acumulado)
       setRodada(novoEstado.rodada)
       setHistorico(novoEstado.historico)
@@ -239,7 +271,10 @@ export default function GasRecolhimento() {
       }
 
       // Salvar localmente primeiro
-      memoryStorageService.saveToLocalStorage(novoEstado)
+      if (isBrowser) {
+        memoryStorageService.saveToLocalStorage(novoEstado)
+      }
+
       setAcumulado(novoEstado.acumulado)
       setRodada(novoEstado.rodada)
       setHistorico(novoEstado.historico)
@@ -261,7 +296,7 @@ export default function GasRecolhimento() {
     setError(null)
 
     try {
-      if (historico.length === 0)  throw new Error("Não há entradas para desfazer")
+      if (historico.length === 0) throw new Error("Não há entradas para desfazer")
 
       const ultimaEntrada = historico[0]
       const novoHistorico = [...historico]
@@ -287,7 +322,10 @@ export default function GasRecolhimento() {
       }
 
       // Salvar localmente primeiro
-      memoryStorageService.saveToLocalStorage(novoEstado)
+      if (isBrowser) {
+        memoryStorageService.saveToLocalStorage(novoEstado)
+      }
+
       setAcumulado(novoEstado.acumulado)
       setRodada(novoEstado.rodada)
       setHistorico(novoEstado.historico)
@@ -426,11 +464,7 @@ export default function GasRecolhimento() {
               </div>
             </div>
 
-            <IndicadorProgresso
-              valor={acumulado}
-              maximo={10000}
-              subtitulo="Progresso: Limite de 10kg por rodada"
-            />
+            <IndicadorProgresso valor={acumulado} maximo={10000} subtitulo="Progresso: Limite de 10kg por rodada" />
 
             {cilindroAtingiuLimite && (
               <Button
@@ -541,13 +575,7 @@ export default function GasRecolhimento() {
           <div className={`w-2 h-2 rounded-full mr-2 ${status.dotColor}`}></div>
           {status.text}
           {statusConexao !== "offline" && (
-            <Button
-              variant="ghost"
-              size="sm"
-              className="ml-2 h-6 px-2"
-              onClick={processQueue}
-              disabled={sincronizando}
-            >
+            <Button variant="ghost" size="sm" className="ml-2 h-6 px-2" onClick={processQueue} disabled={sincronizando}>
               {sincronizando ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
               <span className="ml-1 text-xs">Sincronizar</span>
             </Button>

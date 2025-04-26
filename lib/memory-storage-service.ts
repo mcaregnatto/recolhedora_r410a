@@ -5,6 +5,9 @@ const API_URL = "/api/memory-db"
 const LOCAL_STORAGE_KEY = "gasRecolhimentoData"
 const LAST_SYNC_KEY = "gasRecolhimentoLastSync"
 
+// Verificar se estamos no navegador
+const isBrowser = typeof window !== "undefined"
+
 // Enhanced memory storage service with better persistence
 export const memoryStorageService = {
   // Load data with priority on localStorage for reliability
@@ -39,7 +42,9 @@ export const memoryStorageService = {
       }
 
       // Se os dados da API tiverem histórico, use-os e atualize o localStorage
-      this.saveToLocalStorage(apiData)
+      if (isBrowser) {
+        this.saveToLocalStorage(apiData)
+      }
       return apiData
     } catch (error) {
       console.error("Erro ao carregar dados da API:", error)
@@ -67,7 +72,9 @@ export const memoryStorageService = {
       }
 
       console.log("Dados sincronizados com sucesso com o servidor")
-      this.updateLastSyncTime()
+      if (isBrowser) {
+        this.updateLastSyncTime()
+      }
     } catch (error) {
       console.error("Erro ao sincronizar dados com o servidor:", error)
       // Não lançar erro, apenas registrar
@@ -77,7 +84,9 @@ export const memoryStorageService = {
   // Save data with priority on localStorage
   async salvar(data: EstadoAplicacao): Promise<void> {
     // Sempre salve primeiro no localStorage para garantir persistência
-    this.saveToLocalStorage(data)
+    if (isBrowser) {
+      this.saveToLocalStorage(data)
+    }
 
     try {
       console.log("Salvando dados na API...")
@@ -94,7 +103,9 @@ export const memoryStorageService = {
       }
 
       console.log("Dados salvos com sucesso na API")
-      this.updateLastSyncTime()
+      if (isBrowser) {
+        this.updateLastSyncTime()
+      }
     } catch (error) {
       console.error("Erro ao salvar dados na API:", error)
       throw new Error(
@@ -132,7 +143,7 @@ export const memoryStorageService = {
   // Save data to localStorage
   saveToLocalStorage(data: EstadoAplicacao): void {
     try {
-      if (typeof window !== "undefined") {
+      if (isBrowser) {
         localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data))
         this.updateLastSyncTime()
         console.log("Dados salvos no localStorage")
@@ -144,7 +155,7 @@ export const memoryStorageService = {
 
   // Update last sync time
   updateLastSyncTime(): void {
-    if (typeof window !== "undefined") {
+    if (isBrowser) {
       localStorage.setItem(LAST_SYNC_KEY, new Date().toISOString())
     }
   },
@@ -152,7 +163,7 @@ export const memoryStorageService = {
   // Load data from localStorage
   loadFromLocalStorage(): EstadoAplicacao {
     try {
-      if (typeof window !== "undefined") {
+      if (isBrowser) {
         const data = localStorage.getItem(LOCAL_STORAGE_KEY)
         if (data) {
           console.log("Dados carregados do localStorage")
@@ -179,7 +190,7 @@ export const memoryStorageService = {
 
   // Get last sync time
   getLastSyncTime(): string | null {
-    if (typeof window === "undefined") return null
+    if (!isBrowser) return null
     return localStorage.getItem(LAST_SYNC_KEY)
   },
 
@@ -204,6 +215,8 @@ export const memoryStorageService = {
 
   // Download CSV file
   downloadCSV(historico: EntradaGas[]): void {
+    if (!isBrowser) return
+
     const csv = this.exportarCSV(historico)
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" })
     const url = URL.createObjectURL(blob)
