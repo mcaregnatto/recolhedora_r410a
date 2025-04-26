@@ -1,7 +1,6 @@
 "use client"
 
 import type React from "react"
-
 import { useState, useEffect, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -20,9 +19,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { AlertTriangle, RotateCcw, RefreshCw, Loader2, Download, RefreshCcw, Clock } from "lucide-react"
+import { AlertTriangle, RotateCcw, RefreshCw, Loader2, Download, Clock } from "lucide-react"
 import { memoryStorageService } from "@/lib/memory-storage-service"
 import type { EntradaGas } from "@/lib/types"
+import { v4 as uuidv4 } from 'uuid'
 
 export default function GasRecolhimento() {
   const [gasRetirado, setGasRetirado] = useState<string>("")
@@ -40,91 +40,114 @@ export default function GasRecolhimento() {
   const [confirmarRegistro, setConfirmarRegistro] = useState<boolean>(false)
   const [confirmarTrocaCilindro, setConfirmarTrocaCilindro] = useState<boolean>(false)
   const [confirmarDesfazer, setConfirmarDesfazer] = useState<boolean>(false)
+  const [pendingOperations, setPendingOperations] = useState<number>(0)
 
-  // Monitor connection status
+  // Fila de sincronização
+  const syncQueue: { id: string; operation: any }[] = JSON.parse(localStorage.getItem('syncQueue') || '[]')
+
+  // Função para adicionar operação à fila
+  const addToQueue = useCallback((operation: any) => {
+    const operationId = uuidv4()
+    syncQueue.push({ id: operationId, operation })
+    localStorage.setItem('syncQueue', JSON.stringify(syncQueue))
+    setPendingOperations(syncQueue.length)
+    processQueue()
+  }, [])
+
+  // Função para processar a fila com exponential backoff
+  const processQueue = useCallback(async () => {
+    if (!navigator.onLine || syncQueue.length === 0 || sincronizando) return
+
+    setSincronizando(true)
+    const operation = syncQueue[0]
+
+    try {
+      await memoryStorageService.salvar(operation.operation)
+      syncQueue.shift()
+      localStorage.setItem('syncQueue', JSON.stringify(syncQueue))
+      setPendingOperations(syncQueue.length)
+      setUltimaSincronizacao(new Date().toISOString())
+      setStatusConexao("online")
+      // Processar próxima operação
+      if (syncQueue.length > 0) {
+        setTimeout(processQueue, 100) // Pequeno atraso para evitar sobrecarga
+      }
+    } catch (error) {
+      console.error('Erro ao sincronizar:', error)
+      setStatusConexao("local")
+      setError("Dados salvos localmente. Sincronizando quando possível.")
+      // Exponential backoff: espera 5s, 10s, 20s, etc.
+      setTimeout(processQueue, Math.min(5000 * (syncQueue.length + 1), 300000))
+    } finally {
+      setSincronizando(false)
+    }
+  }, [sincronizando])
+
+  // Monitorar status de conexão
   useEffect(() => {
     const handleOnline = () => {
       setStatusConexao("online")
-      // Tente sincronizar quando voltar online
-      sincronizarDados()
+      processQueue()
     }
     const handleOffline = () => setStatusConexao("offline")
 
     window.addEventListener("online", handleOnline)
     window.addEventListener("offline", handleOffline)
-
-    // Set initial status
     setStatusConexao(navigator.onLine ? "online" : "offline")
 
     return () => {
       window.removeEventListener("online", handleOnline)
       window.removeEventListener("offline", handleOffline)
     }
-  }, [])
+  }, [processQueue])
 
-  // Função para carregar dados - memoizada para evitar recriações
+  // Carregar dados iniciais
   const carregarDados = useCallback(async () => {
     setCarregando(true)
     setError(null)
 
-    try {
-      console.log("Carregando dados...")
-      const dados = await memoryStorageService.carregar()
-      console.log("Dados carregados")
+    // Carregar do localStorage primeiro
+    const localData = memoryStorageService.loadFromLocalStorage()
+    if (localData && Array.isArray(localData.historico)) {
+      setAcumulado(localData.acumulado)
+      setRodada(localData.rodada)
+      setHistorico(localData.historico)
+      setPendingOperations(syncQueue.length)
+    }
 
-      // Verificar se os dados são válidos
+    // Buscar do servidor em segundo plano
+    try {
+      const dados = await memoryStorageService.carregar()
       if (dados && typeof dados.acumulado === "number" && Array.isArray(dados.historico)) {
         setAcumulado(dados.acumulado)
         setRodada(dados.rodada)
         setHistorico(dados.historico)
         setUltimaSincronizacao(new Date().toISOString())
+        memoryStorageService.saveToLocalStorage(dados)
+        setStatusConexao("online")
       } else {
         throw new Error("Dados inválidos recebidos")
       }
     } catch (error) {
-      console.error("Erro ao carregar dados:", error)
-      setError("Não foi possível carregar os dados. Usando dados locais.")
+      console.error("Erro ao carregar dados do servidor:", error)
+      setError("Usando dados locais. Sincronize quando possível.")
       setStatusConexao("local")
-
-      // Tentar carregar do localStorage como último recurso
-      const localData = memoryStorageService.loadFromLocalStorage()
-      if (localData && Array.isArray(localData.historico)) {
-        setAcumulado(localData.acumulado)
-        setRodada(localData.rodada)
-        setHistorico(localData.historico)
-      }
     } finally {
       setCarregando(false)
     }
   }, [])
 
-  // Load data on start
+  // Carregar dados ao iniciar
   useEffect(() => {
     carregarDados()
 
-    // Configurar verificação periódica para garantir que os dados não sejam perdidos
-    const intervalId = setInterval(() => {
-      // Verificar se temos dados no estado e se eles correspondem ao localStorage
-      const localData = memoryStorageService.loadFromLocalStorage()
+    // Disparar sincronização após alterações no estado
+    if (navigator.onLine && !sincronizando) {
+      processQueue()
+    }
+  }, [carregarDados, processQueue, sincronizando])
 
-      // Se não tivermos histórico no estado, mas tivermos no localStorage, recarregue
-      if (historico.length === 0 && localData.historico.length > 0) {
-        console.log("Detectada perda de dados no estado, recarregando do localStorage")
-        setAcumulado(localData.acumulado)
-        setRodada(localData.rodada)
-        setHistorico(localData.historico)
-      }
-
-      // Se estivermos online, tente sincronizar com o servidor periodicamente
-      if (navigator.onLine && !sincronizando && !processando) {
-        memoryStorageService.syncToServer(localData).catch(console.error)
-      }
-    }, 30000) // Verificar a cada 30 segundos
-
-    return () => clearInterval(intervalId)
-  }, [carregarDados, historico.length, sincronizando, processando])
-
-  // Update last sync time
+  // Atualizar última sincronização
   useEffect(() => {
     const lastSync = memoryStorageService.getLastSyncTime()
     if (lastSync) {
@@ -132,40 +155,15 @@ export default function GasRecolhimento() {
     }
   }, [sincronizando])
 
-  // Function to synchronize data
-  const sincronizarDados = async () => {
-    if (statusConexao === "offline") {
-      setError("Não é possível sincronizar dados sem conexão com a internet.")
-      return
-    }
-
-    setSincronizando(true)
-    setError(null)
-
-    try {
-      await carregarDados()
-      setStatusConexao("online")
-      setError(null)
-    } catch (error) {
-      console.error("Erro ao sincronizar dados:", error)
-      setError("Não foi possível sincronizar os dados. Usando dados locais.")
-      setStatusConexao("local")
-    } finally {
-      setSincronizando(false)
-    }
-  }
-
   const validarEntrada = () => {
     if (!gasRetirado || isNaN(Number(gasRetirado)) || Number(gasRetirado) <= 0) {
       setError("Por favor, insira um valor válido maior que zero.")
       return false
     }
-
     if (!operador.trim()) {
       setError("Por favor, informe o nome do operador.")
       return false
     }
-
     setError(null)
     return true
   }
@@ -184,49 +182,34 @@ export default function GasRecolhimento() {
 
     try {
       const quantidade = Number(gasRetirado)
-      const novoAcumulado = acumulado + quantidade
-
       const novaEntrada: EntradaGas = {
         id: Date.now().toString(),
         quantidade,
-        acumulado: novoAcumulado,
+        acumulado: acumulado + quantidade,
         rodada,
         operador: operador.trim(),
         data: new Date().toISOString(),
       }
 
       const novoEstado = {
-        acumulado: novoAcumulado,
+        acumulado: acumulado + quantidade,
         rodada,
         historico: [novaEntrada, ...historico],
       }
 
-      // Atualiza visualmente na hora
-      setAcumulado(novoAcumulado)
-      setRodada(rodada)
-      setHistorico([novaEntrada, ...historico])
+      // Salvar localmente primeiro
+      memoryStorageService.saveToLocalStorage(novoEstado)
+      setAcumulado(novoEstado.acumulado)
+      setRodada(novoEstado.rodada)
+      setHistorico(novoEstado.historico)
+      setGasRetirado("")
       setUltimaSincronizacao(new Date().toISOString())
 
-      // Salva no servidor em background
-      memoryStorageService.salvar(novoEstado)
-        .then(() => {
-          setStatusConexao("online")
-        })
-        .catch((error) => {
-          console.error("Erro ao salvar no servidor:", error)
-          memoryStorageService.saveToLocalStorage(novoEstado)
-          setStatusConexao("local")
-          setError(
-            "Dados salvos apenas localmente. Sincronize quando estiver online para compartilhar com outros usuários."
-          )
-        })
-
-      setGasRetirado("")
+      // Adicionar à fila para sincronização
+      addToQueue(novoEstado)
     } catch (error) {
       console.error("Erro ao registrar gás:", error)
-      setError(
-        "Erro interno ao tentar registrar a entrada. Tente novamente."
-      )
+      setError("Erro ao registrar. Dados salvos localmente.")
     } finally {
       setProcessando(false)
     }
@@ -238,13 +221,11 @@ export default function GasRecolhimento() {
     setError(null)
 
     try {
-      const novaRodada = rodada + 1
-
       const novaEntrada: EntradaGas = {
         id: Date.now().toString(),
         quantidade: 0,
         acumulado: 0,
-        rodada: novaRodada,
+        rodada: rodada + 1,
         data: new Date().toISOString(),
         operador: operador.trim(),
         valorFinalRodada: acumulado,
@@ -253,33 +234,22 @@ export default function GasRecolhimento() {
 
       const novoEstado = {
         acumulado: 0,
-        rodada: novaRodada,
+        rodada: rodada + 1,
         historico: [novaEntrada, ...historico],
       }
 
-      // Atualiza instantaneamente
-      setAcumulado(0)
-      setRodada(novaRodada)
-      setHistorico([novaEntrada, ...historico])
+      // Salvar localmente primeiro
+      memoryStorageService.saveToLocalStorage(novoEstado)
+      setAcumulado(novoEstado.acumulado)
+      setRodada(novoEstado.rodada)
+      setHistorico(novoEstado.historico)
       setUltimaSincronizacao(new Date().toISOString())
 
-      // Salva no servidor em segundo plano
-      memoryStorageService.salvar(novoEstado)
-        .then(() => {
-          setStatusConexao("online")
-        })
-        .catch((error) => {
-          console.error("Erro ao salvar no servidor:", error)
-          memoryStorageService.saveToLocalStorage(novoEstado)
-          setStatusConexao("local")
-          setError(
-            "Troca de cilindro salva apenas localmente. Sincronize quando estiver online para compartilhar com outros usuários."
-          )
-        })
-
+      // Adicionar à fila para sincronização
+      addToQueue(novoEstado)
     } catch (error) {
       console.error("Erro ao trocar cilindro:", error)
-      setError("Erro interno ao tentar trocar o cilindro. Tente novamente.")
+      setError("Erro ao trocar cilindro. Dados salvos localmente.")
     } finally {
       setProcessando(false)
     }
@@ -291,9 +261,7 @@ export default function GasRecolhimento() {
     setError(null)
 
     try {
-      if (historico.length === 0) {
-        throw new Error("Não há entradas para desfazer")
-      }
+      if (historico.length === 0)  throw new Error("Não há entradas para desfazer")
 
       const ultimaEntrada = historico[0]
       const novoHistorico = [...historico]
@@ -303,13 +271,13 @@ export default function GasRecolhimento() {
       let novaRodada = rodada
 
       if (ultimaEntrada.trocaCilindro) {
-        novaRodada = novaRodada - 1
+        novaRodada = rodada - 1
         novoAcumulado = ultimaEntrada.valorFinalRodada || 0
       } else if (ultimaEntrada.valorFinalRodada) {
-        novaRodada = novaRodada - 1
-        novoAcumulado = (ultimaEntrada.valorFinalRodada || 0) - (ultimaEntrada.quantidade || 0)
+        novaRodada = rodada - 1
+        novoAcumulado = ultimaEntrada.valorFinalRodada - ultimaEntrada.quantidade
       } else {
-        novoAcumulado = novoAcumulado - (ultimaEntrada.quantidade || 0)
+        novoAcumulado = acumulado - ultimaEntrada.quantidade
       }
 
       const novoEstado = {
@@ -318,32 +286,18 @@ export default function GasRecolhimento() {
         historico: novoHistorico,
       }
 
-      // Atualiza instantaneamente
-      setAcumulado(novoAcumulado)
-      setRodada(novaRodada)
-      setHistorico(novoHistorico)
+      // Salvar localmente primeiro
+      memoryStorageService.saveToLocalStorage(novoEstado)
+      setAcumulado(novoEstado.acumulado)
+      setRodada(novoEstado.rodada)
+      setHistorico(novoEstado.historico)
       setUltimaSincronizacao(new Date().toISOString())
 
-      // Salva no servidor em segundo plano
-      memoryStorageService.salvar(novoEstado)
-        .then(() => {
-          setStatusConexao("online")
-        })
-        .catch((error) => {
-          console.error("Erro ao salvar no servidor:", error)
-          memoryStorageService.saveToLocalStorage(novoEstado)
-          setStatusConexao("local")
-          setError(
-            "Operação de desfazer salva apenas localmente. Sincronize quando estiver online para compartilhar com outros usuários."
-          )
-        })
-
+      // Adicionar à fila para sincronização
+      addToQueue(novoEstado)
     } catch (error) {
       console.error("Erro ao desfazer registro:", error)
-      setError(
-        "Não foi possível desfazer o último registro. " +
-        (error instanceof Error ? error.message : "Por favor, tente novamente."),
-      )
+      setError("Não foi possível desfazer o último registro.")
     } finally {
       setProcessando(false)
     }
@@ -354,22 +308,19 @@ export default function GasRecolhimento() {
       memoryStorageService.downloadCSV(historico)
     } catch (error) {
       console.error("Erro ao exportar histórico:", error)
-      setError("Não foi possível exportar o histórico. Por favor, tente novamente.")
+      setError("Não foi possível exportar o histórico.")
     }
   }
 
-  // Format last sync time
   const formatLastSync = () => {
     if (!ultimaSincronizacao) return "Nunca"
-
     try {
       return new Date(ultimaSincronizacao).toLocaleString("pt-BR")
-    } catch (e) {
+    } catch {
       return "Desconhecido"
     }
   }
 
-  // Get status display
   const getStatusDisplay = () => {
     switch (statusConexao) {
       case "online":
@@ -383,7 +334,7 @@ export default function GasRecolhimento() {
         }
       case "local":
         return {
-          text: "Modo Local - Dados salvos apenas localmente",
+          text: "Modo Local - Dados salvos localmente",
           bgColor: "bg-blue-50",
           textColor: "text-blue-700",
           dotColor: "bg-blue-500",
@@ -393,7 +344,6 @@ export default function GasRecolhimento() {
     }
   }
 
-  // Check if cylinder is full (accumulated >= 10000)
   const cilindroAtingiuLimite = acumulado >= 10000
   const status = getStatusDisplay()
 
@@ -584,37 +534,37 @@ export default function GasRecolhimento() {
         </Button>
       </div>
 
-      {/* Status indicators moved to bottom */}
       <div className="mt-8 pt-4 border-t border-gray-200">
-        {/* Connection status indicator */}
         <div
           className={`text-sm font-medium flex items-center justify-center p-2 rounded-md ${status.bgColor} ${status.textColor}`}
         >
           <div className={`w-2 h-2 rounded-full mr-2 ${status.dotColor}`}></div>
           {status.text}
-
           {statusConexao !== "offline" && (
             <Button
               variant="ghost"
               size="sm"
               className="ml-2 h-6 px-2"
-              onClick={sincronizarDados}
+              onClick={processQueue}
               disabled={sincronizando}
             >
-              {sincronizando ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCcw className="h-3 w-3" />}
+              {sincronizando ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
               <span className="ml-1 text-xs">Sincronizar</span>
             </Button>
           )}
         </div>
-
-        {/* Last sync time */}
         <div className="text-xs text-center text-muted-foreground flex items-center justify-center mt-2">
           <Clock className="h-3 w-3 mr-1" />
           Última sincronização: {formatLastSync()}
+          {pendingOperations > 0 && (
+            <span className="ml-2 flex items-center">
+              <RefreshCw className="h-3 w-3 mr-1 animate-spin" />
+              Sincronizando {pendingOperations} operação(ões)...
+            </span>
+          )}
         </div>
       </div>
 
-      {/* Confirmation dialog for registering */}
       <Dialog open={confirmarRegistro} onOpenChange={setConfirmarRegistro}>
         <DialogContent>
           <DialogHeader>
@@ -641,7 +591,6 @@ export default function GasRecolhimento() {
         </DialogContent>
       </Dialog>
 
-      {/* Confirmation dialog for undoing */}
       <Dialog open={confirmarDesfazer} onOpenChange={setConfirmarDesfazer}>
         <DialogContent>
           <DialogHeader>
@@ -694,7 +643,6 @@ export default function GasRecolhimento() {
         </DialogContent>
       </Dialog>
 
-      {/* Confirmation dialog for cylinder change */}
       <Dialog open={confirmarTrocaCilindro} onOpenChange={setConfirmarTrocaCilindro}>
         <DialogContent>
           <DialogHeader>
