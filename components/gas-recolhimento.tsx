@@ -19,8 +19,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { AlertTriangle, RotateCcw, RefreshCw, Loader2, Download, Clock, Save, AlertCircle } from "lucide-react"
+import { AlertTriangle, RotateCcw, RefreshCw, Loader2, Download, Clock, Save, AlertCircle, Trash2 } from "lucide-react"
 import { persistentStorageService } from "@/lib/persistent-storage-service"
+import { syncService } from "@/lib/sync-service"
 import type { EntradaGas } from "@/lib/types"
 
 // Verificar se estamos no navegador
@@ -45,6 +46,8 @@ export default function GasRecolhimento() {
   const [pendingOperations, setPendingOperations] = useState<number>(0)
   const [salvamentoAutomatico, setSalvamentoAutomatico] = useState<boolean>(true)
   const [alertaSalvamento, setAlertaSalvamento] = useState<boolean>(false)
+  const [confirmarLimparFila, setConfirmarLimparFila] = useState<boolean>(false)
+  const [statusSincronizacao, setStatusSincronizacao] = useState<"idle" | "syncing" | "error" | "success">("idle")
 
   // Referência para o estado atual para uso em temporizadores
   const stateRef = useRef({ acumulado, rodada, historico })
@@ -53,6 +56,25 @@ export default function GasRecolhimento() {
   useEffect(() => {
     stateRef.current = { acumulado, rodada, historico }
   }, [acumulado, rodada, historico])
+
+  // Inicializar serviço de sincronização
+  useEffect(() => {
+    if (isBrowser) {
+      syncService.initSyncState()
+
+      // Verificar operações pendentes
+      const pendingCount = syncService.getPendingOperationsCount()
+      setPendingOperations(pendingCount)
+
+      // Verificar estado de sincronização
+      const syncState = syncService.getSyncState()
+      if (syncState.inProgress) {
+        setStatusSincronizacao("syncing")
+      } else if (syncState.lastError) {
+        setStatusSincronizacao("error")
+      }
+    }
+  }, [])
 
   // Monitorar status de conexão
   useEffect(() => {
@@ -79,6 +101,7 @@ export default function GasRecolhimento() {
     if (!isBrowser || !navigator.onLine || sincronizando) return
 
     setSincronizando(true)
+    setStatusSincronizacao("syncing")
     setError(null)
 
     try {
@@ -88,31 +111,52 @@ export default function GasRecolhimento() {
       // Criar objeto de estado
       const estado = { acumulado, rodada, historico }
 
-      // Tentar sincronizar
-      const success = await persistentStorageService.salvar(estado)
+      // Adicionar à fila de sincronização
+      syncService.addToSyncQueue(estado)
+
+      // Processar fila
+      const success = await syncService.processQueue()
 
       if (success) {
         setUltimaSincronizacao(new Date().toISOString())
         setStatusConexao("online")
+        setStatusSincronizacao("success")
         console.log("Sincronização manual concluída com sucesso")
       } else {
         setStatusConexao("local")
+        setStatusSincronizacao("error")
         setError("Sincronização parcial. Alguns dados podem estar apenas localmente.")
       }
 
       // Atualizar número de operações pendentes
-      if (isBrowser) {
-        const queue = persistentStorageService.getSyncQueue()
-        setPendingOperations(queue.length)
-      }
+      setPendingOperations(syncService.getPendingOperationsCount())
     } catch (error) {
       console.error("Erro na sincronização manual:", error)
       setStatusConexao("local")
+      setStatusSincronizacao("error")
       setError("Erro ao sincronizar. Dados salvos localmente.")
     } finally {
       setSincronizando(false)
+
+      // Resetar status de sucesso após 3 segundos
+      if (statusSincronizacao === "success") {
+        setTimeout(() => {
+          setStatusSincronizacao("idle")
+        }, 3000)
+      }
     }
-  }, [sincronizando])
+  }, [sincronizando, statusSincronizacao])
+
+  // Limpar fila de sincronização
+  const limparFilaSincronizacao = useCallback(() => {
+    if (!isBrowser) return
+
+    syncService.clearSyncQueue()
+    setPendingOperations(0)
+    setConfirmarLimparFila(false)
+    setStatusSincronizacao("idle")
+    setError(null)
+  }, [])
 
   // Configurar salvamento automático periódico
   useEffect(() => {
@@ -140,6 +184,32 @@ export default function GasRecolhimento() {
 
     return () => clearInterval(interval)
   }, [salvamentoAutomatico, sincronizarDados])
+
+  // Verificar periodicamente a fila de sincronização
+  useEffect(() => {
+    if (!isBrowser) return
+
+    const interval = setInterval(() => {
+      if (navigator.onLine && !sincronizando && syncService.hasPendingOperations()) {
+        console.log("Verificando fila de sincronização...")
+        syncService
+          .processQueue()
+          .then((success) => {
+            if (success) {
+              setUltimaSincronizacao(new Date().toISOString())
+              setPendingOperations(0)
+            } else {
+              setPendingOperations(syncService.getPendingOperationsCount())
+            }
+          })
+          .catch((err) => {
+            console.error("Erro ao processar fila de sincronização:", err)
+          })
+      }
+    }, 30000) // Verificar a cada 30 segundos
+
+    return () => clearInterval(interval)
+  }, [sincronizando])
 
   // Carregar dados iniciais
   const carregarDados = useCallback(async () => {
@@ -170,8 +240,7 @@ export default function GasRecolhimento() {
 
       // Atualizar número de operações pendentes
       if (isBrowser) {
-        const queue = persistentStorageService.getSyncQueue()
-        setPendingOperations(queue.length)
+        setPendingOperations(syncService.getPendingOperationsCount())
       }
     } catch (error) {
       console.error("Erro ao carregar dados:", error)
@@ -271,21 +340,19 @@ export default function GasRecolhimento() {
       setHistorico(novoEstado.historico)
       setGasRetirado("")
 
-      // Salvar dados
-      const success = await persistentStorageService.salvar(novoEstado)
+      // Salvar dados localmente
+      persistentStorageService.saveToLocalStorage(novoEstado)
 
-      if (success) {
-        setUltimaSincronizacao(new Date().toISOString())
-        setStatusConexao("online")
+      // Adicionar à fila de sincronização
+      syncService.addToSyncQueue(novoEstado)
+      setPendingOperations(syncService.getPendingOperationsCount())
+
+      // Tentar sincronizar imediatamente se online
+      if (navigator.onLine) {
+        sincronizarDados()
       } else {
         setStatusConexao("local")
         setError("Registro salvo localmente. Sincronize quando possível.")
-      }
-
-      // Atualizar número de operações pendentes
-      if (isBrowser) {
-        const queue = persistentStorageService.getSyncQueue()
-        setPendingOperations(queue.length)
       }
     } catch (error) {
       console.error("Erro ao registrar gás:", error)
@@ -324,21 +391,19 @@ export default function GasRecolhimento() {
       setRodada(novoEstado.rodada)
       setHistorico(novoEstado.historico)
 
-      // Salvar dados
-      const success = await persistentStorageService.salvar(novoEstado)
+      // Salvar dados localmente
+      persistentStorageService.saveToLocalStorage(novoEstado)
 
-      if (success) {
-        setUltimaSincronizacao(new Date().toISOString())
-        setStatusConexao("online")
+      // Adicionar à fila de sincronização
+      syncService.addToSyncQueue(novoEstado)
+      setPendingOperations(syncService.getPendingOperationsCount())
+
+      // Tentar sincronizar imediatamente se online
+      if (navigator.onLine) {
+        sincronizarDados()
       } else {
         setStatusConexao("local")
         setError("Troca de cilindro registrada localmente. Sincronize quando possível.")
-      }
-
-      // Atualizar número de operações pendentes
-      if (isBrowser) {
-        const queue = persistentStorageService.getSyncQueue()
-        setPendingOperations(queue.length)
       }
     } catch (error) {
       console.error("Erro ao trocar cilindro:", error)
@@ -385,21 +450,19 @@ export default function GasRecolhimento() {
       setRodada(novoEstado.rodada)
       setHistorico(novoEstado.historico)
 
-      // Salvar dados
-      const success = await persistentStorageService.salvar(novoEstado)
+      // Salvar dados localmente
+      persistentStorageService.saveToLocalStorage(novoEstado)
 
-      if (success) {
-        setUltimaSincronizacao(new Date().toISOString())
-        setStatusConexao("online")
+      // Adicionar à fila de sincronização
+      syncService.addToSyncQueue(novoEstado)
+      setPendingOperations(syncService.getPendingOperationsCount())
+
+      // Tentar sincronizar imediatamente se online
+      if (navigator.onLine) {
+        sincronizarDados()
       } else {
         setStatusConexao("local")
         setError("Operação desfeita localmente. Sincronize quando possível.")
-      }
-
-      // Atualizar número de operações pendentes
-      if (isBrowser) {
-        const queue = persistentStorageService.getSyncQueue()
-        setPendingOperations(queue.length)
       }
     } catch (error) {
       console.error("Erro ao desfazer registro:", error)
@@ -450,8 +513,42 @@ export default function GasRecolhimento() {
     }
   }
 
+  const getSyncButtonState = () => {
+    switch (statusSincronizacao) {
+      case "syncing":
+        return {
+          icon: <Loader2 className="h-3 w-3 animate-spin" />,
+          text: "Sincronizando...",
+          disabled: true,
+          variant: "ghost" as const,
+        }
+      case "error":
+        return {
+          icon: <RefreshCw className="h-3 w-3" />,
+          text: "Tentar novamente",
+          disabled: false,
+          variant: "outline" as const,
+        }
+      case "success":
+        return {
+          icon: <RefreshCw className="h-3 w-3" />,
+          text: "Sincronizado",
+          disabled: true,
+          variant: "ghost" as const,
+        }
+      default:
+        return {
+          icon: <RefreshCw className="h-3 w-3" />,
+          text: "Sincronizar",
+          disabled: false,
+          variant: "ghost" as const,
+        }
+    }
+  }
+
   const cilindroAtingiuLimite = acumulado >= 10000
   const status = getStatusDisplay()
+  const syncButtonState = getSyncButtonState()
 
   if (carregando) {
     return (
@@ -656,14 +753,14 @@ export default function GasRecolhimento() {
           {status.text}
           {statusConexao !== "offline" && (
             <Button
-              variant="ghost"
+              variant={syncButtonState.variant}
               size="sm"
               className="ml-2 h-6 px-2"
               onClick={sincronizarDados}
-              disabled={sincronizando}
+              disabled={syncButtonState.disabled}
             >
-              {sincronizando ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-              <span className="ml-1 text-xs">Sincronizar</span>
+              {syncButtonState.icon}
+              <span className="ml-1 text-xs">{syncButtonState.text}</span>
             </Button>
           )}
         </div>
@@ -673,7 +770,10 @@ export default function GasRecolhimento() {
           {pendingOperations > 0 && (
             <span className="ml-2 flex items-center">
               <RefreshCw className="h-3 w-3 mr-1 animate-spin" />
-              Sincronizando {pendingOperations} operação(ões)...
+              {pendingOperations} operação(ões) pendente(s)
+              <Button variant="ghost" size="sm" className="ml-1 h-5 px-1" onClick={() => setConfirmarLimparFila(true)}>
+                <Trash2 className="h-3 w-3" />
+              </Button>
             </span>
           )}
         </div>
@@ -782,6 +882,29 @@ export default function GasRecolhimento() {
               ) : (
                 "Confirmar Troca"
               )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={confirmarLimparFila} onOpenChange={setConfirmarLimparFila}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Limpar fila de sincronização</DialogTitle>
+            <DialogDescription>
+              Você está prestes a limpar a fila de sincronização com {pendingOperations} operação(ões) pendente(s).
+              <div className="mt-2 flex items-center text-amber-600">
+                <AlertTriangle className="h-4 w-4 mr-2" />
+                <span>Esta ação não pode ser desfeita e os dados não sincronizados serão perdidos.</span>
+              </div>
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmarLimparFila(false)}>
+              Cancelar
+            </Button>
+            <Button variant="destructive" onClick={limparFilaSincronizacao}>
+              Limpar Fila
             </Button>
           </DialogFooter>
         </DialogContent>

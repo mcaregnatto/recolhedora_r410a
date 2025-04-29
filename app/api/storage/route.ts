@@ -7,6 +7,26 @@ import fs from "fs"
 const DB_FILE_PATH = path.join(process.cwd(), "data", "storage.json")
 const LOCK_FILE_PATH = path.join(process.cwd(), "data", "storage.lock")
 const LOCK_TIMEOUT = 30000 // 30 segundos
+const LOG_FILE_PATH = path.join(process.cwd(), "data", "storage.log")
+
+// Função para registrar logs
+const logOperation = async (message: string): Promise<void> => {
+  try {
+    const timestamp = new Date().toISOString()
+    const logMessage = `[${timestamp}] ${message}\n`
+
+    // Garantir que o diretório exista
+    const dir = path.dirname(LOG_FILE_PATH)
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true })
+    }
+
+    // Append ao arquivo de log
+    fs.appendFileSync(LOG_FILE_PATH, logMessage)
+  } catch (error) {
+    console.error("Erro ao registrar log:", error)
+  }
+}
 
 // Garantir que o diretório exista
 const ensureDirectoryExists = () => {
@@ -29,68 +49,126 @@ const ensureFileExists = async () => {
     }
 
     await writeFile(DB_FILE_PATH, JSON.stringify(initialState, null, 2), "utf8")
+    await logOperation("Arquivo de banco de dados criado com estado inicial")
   }
 }
 
-// Adquirir bloqueio para escrita
-const acquireLock = async (clientId: string): Promise<boolean> => {
+// Adquirir bloqueio para escrita com timeout
+const acquireLock = async (clientId: string, requestId: string): Promise<boolean> => {
   try {
     ensureDirectoryExists()
+    await logOperation(`Tentativa de adquirir bloqueio: Cliente ${clientId}, Requisição ${requestId}`)
 
     // Verificar se o bloqueio já existe
     if (fs.existsSync(LOCK_FILE_PATH)) {
       const lockContent = await readFile(LOCK_FILE_PATH, "utf8")
-      const lockData = JSON.parse(lockContent)
+      let lockData
+
+      try {
+        lockData = JSON.parse(lockContent)
+      } catch (error) {
+        // Se o arquivo de bloqueio estiver corrompido, remover e criar novo
+        await logOperation(`Arquivo de bloqueio corrompido, removendo: ${error}`)
+        fs.unlinkSync(LOCK_FILE_PATH)
+        return acquireLock(clientId, requestId)
+      }
 
       // Verificar se o bloqueio expirou
       const lockTime = new Date(lockData.timestamp).getTime()
       const currentTime = Date.now()
 
       if (currentTime - lockTime < LOCK_TIMEOUT && lockData.clientId !== clientId) {
-        console.log(`Bloqueio em uso por ${lockData.clientId}, não pode ser adquirido por ${clientId}`)
+        await logOperation(`Bloqueio em uso por ${lockData.clientId}, não pode ser adquirido por ${clientId}`)
         return false
+      }
+
+      // Se o bloqueio expirou, podemos sobrescrevê-lo
+      if (currentTime - lockTime >= LOCK_TIMEOUT) {
+        await logOperation(`Bloqueio expirado de ${lockData.clientId}, será sobrescrito por ${clientId}`)
       }
     }
 
     // Criar novo bloqueio
     const lockData = {
       clientId,
+      requestId,
       timestamp: new Date().toISOString(),
-      requestId: `req_${Date.now()}`,
     }
 
     await writeFile(LOCK_FILE_PATH, JSON.stringify(lockData, null, 2), "utf8")
+    await logOperation(`Bloqueio adquirido por ${clientId} para requisição ${requestId}`)
     return true
   } catch (error) {
-    console.error("Erro ao adquirir bloqueio:", error)
+    await logOperation(`Erro ao adquirir bloqueio: ${error}`)
     return false
   }
 }
 
-// Liberar bloqueio
-const releaseLock = async (clientId: string): Promise<void> => {
+// Liberar bloqueio com verificação de propriedade
+const releaseLock = async (clientId: string, requestId: string): Promise<boolean> => {
   try {
-    if (fs.existsSync(LOCK_FILE_PATH)) {
-      const lockContent = await readFile(LOCK_FILE_PATH, "utf8")
-      const lockData = JSON.parse(lockContent)
+    if (!fs.existsSync(LOCK_FILE_PATH)) {
+      await logOperation(`Tentativa de liberar bloqueio inexistente: Cliente ${clientId}, Requisição ${requestId}`)
+      return true
+    }
 
-      // Só liberar se for o mesmo cliente
-      if (lockData.clientId === clientId) {
+    const lockContent = await readFile(LOCK_FILE_PATH, "utf8")
+    let lockData
+
+    try {
+      lockData = JSON.parse(lockContent)
+    } catch (error) {
+      // Se o arquivo de bloqueio estiver corrompido, remover
+      await logOperation(`Arquivo de bloqueio corrompido ao liberar, removendo: ${error}`)
+      fs.unlinkSync(LOCK_FILE_PATH)
+      return true
+    }
+
+    // Só liberar se for o mesmo cliente e requisição
+    if (lockData.clientId === clientId && lockData.requestId === requestId) {
+      fs.unlinkSync(LOCK_FILE_PATH)
+      await logOperation(`Bloqueio liberado por ${clientId} para requisição ${requestId}`)
+      return true
+    } else if (lockData.clientId === clientId) {
+      // Se for o mesmo cliente mas requisição diferente, verificar timeout
+      const lockTime = new Date(lockData.timestamp).getTime()
+      const currentTime = Date.now()
+
+      if (currentTime - lockTime >= LOCK_TIMEOUT) {
         fs.unlinkSync(LOCK_FILE_PATH)
+        await logOperation(`Bloqueio expirado liberado por ${clientId} (requisição diferente)`)
+        return true
       }
+
+      await logOperation(
+        `Tentativa de liberar bloqueio de outra requisição: ${clientId} atual: ${requestId}, bloqueio: ${lockData.requestId}`,
+      )
+      return false
+    } else {
+      await logOperation(
+        `Tentativa de liberar bloqueio de outro cliente: solicitado por ${clientId}, pertence a ${lockData.clientId}`,
+      )
+      return false
     }
   } catch (error) {
-    console.error("Erro ao liberar bloqueio:", error)
+    await logOperation(`Erro ao liberar bloqueio: ${error}`)
+    return false
   }
 }
 
 // Endpoint GET para ler o arquivo
 export async function GET(request: Request) {
+  const clientId = request.headers.get("X-Client-ID") || "unknown"
+  const requestId = request.headers.get("X-Request-ID") || `req_${Date.now()}`
+
+  await logOperation(`GET recebido: Cliente ${clientId}, Requisição ${requestId}`)
+
   try {
     await ensureFileExists()
 
     // Ler o arquivo
     const data = await readFile(DB_FILE_PATH, "utf8")
+    await logOperation(`GET bem-sucedido: Cliente ${clientId}, Requisição ${requestId}`)
 
     // Retornar o conteúdo como JSON
     return new Response(data, {
@@ -100,7 +178,7 @@ export async function GET(request: Request) {
       },
     })
   } catch (error) {
-    console.error("Erro ao ler arquivo de banco de dados:", error)
+    await logOperation(`Erro em GET: Cliente ${clientId}, Requisição ${requestId}, Erro: ${error}`)
 
     // Se ocorrer qualquer erro, retornar um objeto vazio
     return new Response(
@@ -130,12 +208,12 @@ export async function POST(request: Request) {
   const clientId = request.headers.get("X-Client-ID") || "unknown"
   const requestId = request.headers.get("X-Request-ID") || `req_${Date.now()}`
 
-  console.log(`Recebida requisição POST de ${clientId} (${requestId})`)
+  await logOperation(`POST recebido: Cliente ${clientId}, Requisição ${requestId}`)
 
   // Tentar adquirir bloqueio
-  const lockAcquired = await acquireLock(clientId)
+  const lockAcquired = await acquireLock(clientId, requestId)
   if (!lockAcquired) {
-    console.log(`Cliente ${clientId} não conseguiu adquirir bloqueio`)
+    await logOperation(`Cliente ${clientId} não conseguiu adquirir bloqueio para requisição ${requestId}`)
     return NextResponse.json(
       { success: false, message: "Não foi possível adquirir bloqueio. Tente novamente." },
       { status: 423 }, // Locked
@@ -162,14 +240,25 @@ export async function POST(request: Request) {
 
     if (newData.historico.length > currentData.historico.length) {
       shouldUpdate = true
+      await logOperation(
+        `Atualizando dados: novos dados têm mais entradas (${newData.historico.length} vs ${currentData.historico.length})`,
+      )
     } else if (newData.lastUpdated && currentData.lastUpdated) {
       const newDate = new Date(newData.lastUpdated).getTime()
       const currentDate = new Date(currentData.lastUpdated).getTime()
       shouldUpdate = newDate > currentDate
+      if (shouldUpdate) {
+        await logOperation(
+          `Atualizando dados: novos dados são mais recentes (${newData.lastUpdated} vs ${currentData.lastUpdated})`,
+        )
+      }
     }
 
     if (!shouldUpdate) {
-      console.log("Dados recebidos não são mais recentes que os atuais, ignorando")
+      await logOperation(
+        `Dados recebidos não são mais recentes, ignorando: Cliente ${clientId}, Requisição ${requestId}`,
+      )
+      await releaseLock(clientId, requestId)
       return NextResponse.json({ success: true, message: "Nenhuma atualização necessária" })
     }
 
@@ -181,15 +270,18 @@ export async function POST(request: Request) {
 
     // Escrever no arquivo
     await writeFile(DB_FILE_PATH, jsonString, "utf8")
-    console.log(`Dados salvos com sucesso por ${clientId}`)
+    await logOperation(`Dados salvos com sucesso: Cliente ${clientId}, Requisição ${requestId}`)
+
+    // Liberar bloqueio
+    await releaseLock(clientId, requestId)
 
     return NextResponse.json({ success: true, message: "Dados salvos com sucesso" })
   } catch (error) {
-    console.error(`Erro ao salvar dados (cliente ${clientId}):`, error)
+    await logOperation(`Erro ao salvar dados: Cliente ${clientId}, Requisição ${requestId}, Erro: ${error}`)
+
+    // Sempre tentar liberar o bloqueio, mesmo em caso de erro
+    await releaseLock(clientId, requestId)
+
     return NextResponse.json({ success: false, message: "Erro ao salvar dados", error: String(error) }, { status: 500 })
-  } finally {
-    // Sempre liberar o bloqueio
-    await releaseLock(clientId)
-    console.log(`Bloqueio liberado por ${clientId}`)
   }
 }
