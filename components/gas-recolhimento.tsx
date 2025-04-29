@@ -20,11 +20,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { RotateCcw, RefreshCw, Loader2, Download, Clock, Save, AlertCircle, Trash2 } from "lucide-react"
+import { RotateCcw, RefreshCw, Loader2, Download, Clock, Save, AlertCircle, Wifi, WifiOff } from "lucide-react"
 import { persistentStorageService } from "@/lib/persistent-storage-service"
-import { syncService } from "@/lib/sync-service"
+import { realtimeSyncService } from "@/lib/realtime-sync-service"
 import { networkDiagnostic } from "@/lib/network-diagnostic"
-import type { EntradaGas } from "@/lib/types"
+import type { EntradaGas, EstadoAplicacao } from "@/lib/types"
 
 // Verificar se estamos no navegador
 const isBrowser = typeof window !== "undefined"
@@ -45,10 +45,8 @@ export default function GasRecolhimento() {
   const [confirmarRegistro, setConfirmarRegistro] = useState<boolean>(false)
   const [confirmarTrocaCilindro, setConfirmarTrocaCilindro] = useState<boolean>(false)
   const [confirmarDesfazer, setConfirmarDesfazer] = useState<boolean>(false)
-  const [pendingOperations, setPendingOperations] = useState<number>(0)
-  const [salvamentoAutomatico, setSalvamentoAutomatico] = useState<boolean>(true)
+  const [sincronizacaoAutomatica, setSincronizacaoAutomatica] = useState<boolean>(true)
   const [alertaSalvamento, setAlertaSalvamento] = useState<boolean>(false)
-  const [confirmarLimparFila, setConfirmarLimparFila] = useState<boolean>(false)
   const [statusSincronizacao, setStatusSincronizacao] = useState<"idle" | "syncing" | "error" | "success">("idle")
   const [apiAvailable, setApiAvailable] = useState<boolean>(true)
 
@@ -60,44 +58,60 @@ export default function GasRecolhimento() {
     stateRef.current = { acumulado, rodada, historico }
   }, [acumulado, rodada, historico])
 
-  // Inicializar serviço de sincronização
-  useEffect(() => {
-    if (isBrowser) {
-      syncService.initSyncState()
-
-      // Verificar operações pendentes
-      const pendingCount = syncService.getPendingOperationsCount()
-      setPendingOperations(pendingCount)
-
-      // Verificar estado de sincronização
-      const syncState = syncService.getSyncState()
-      if (syncState.inProgress) {
-        setStatusSincronizacao("syncing")
-      } else if (syncState.lastError) {
-        setStatusSincronizacao("error")
-      }
-
-      // Verificar disponibilidade da API
-      checkApiAvailability()
-    }
-  }, [])
-
   // Verificar disponibilidade da API
   const checkApiAvailability = useCallback(async () => {
     if (!isBrowser) return
 
     try {
-      const result = await networkDiagnostic.checkApiAvailability()
+      const result = await networkDiagnostic.checkApiAvailability("/api/realtime-db")
       setApiAvailable(result.available)
 
       if (!result.available) {
         setStatusConexao("error")
         setError(`API indisponível: ${result.error}`)
+      } else {
+        setStatusConexao(navigator.onLine ? "online" : "offline")
       }
     } catch (error) {
       console.error("Erro ao verificar disponibilidade da API:", error)
     }
   }, [])
+
+  // Inicializar polling para atualizações em tempo real
+  useEffect(() => {
+    if (!isBrowser || !sincronizacaoAutomatica) return
+
+    // Função para atualizar dados quando receber atualizações
+    const handleDataUpdate = (data: EstadoAplicacao) => {
+      // Verificar se os dados são diferentes dos atuais
+      const currentState = stateRef.current
+
+      // Se os dados recebidos forem diferentes, atualizar o estado
+      if (
+        data.historico.length !== currentState.historico.length ||
+        data.acumulado !== currentState.acumulado ||
+        data.rodada !== currentState.rodada
+      ) {
+        console.log("Recebida atualização em tempo real")
+        setAcumulado(data.acumulado)
+        setRodada(data.rodada)
+        setHistorico(data.historico)
+        setUltimaSincronizacao(new Date().toISOString())
+
+        // Mostrar alerta de atualização
+        setAlertaSalvamento(true)
+        setTimeout(() => setAlertaSalvamento(false), 3000)
+      }
+    }
+
+    // Iniciar polling
+    realtimeSyncService.startPolling(handleDataUpdate)
+
+    // Limpar ao desmontar
+    return () => {
+      realtimeSyncService.stopPolling()
+    }
+  }, [sincronizacaoAutomatica])
 
   // Monitorar status de conexão
   useEffect(() => {
@@ -118,7 +132,7 @@ export default function GasRecolhimento() {
     setStatusConexao(navigator.onLine ? "online" : "offline")
 
     // Verificar disponibilidade da API periodicamente
-    const apiCheckInterval = setInterval(checkApiAvailability, 60000) // A cada minuto
+    const apiCheckInterval = setInterval(checkApiAvailability, 30000) // A cada 30 segundos
 
     return () => {
       window.removeEventListener("online", handleOnline)
@@ -137,7 +151,7 @@ export default function GasRecolhimento() {
 
     try {
       // Verificar disponibilidade da API
-      const apiStatus = await networkDiagnostic.checkApiAvailability()
+      const apiStatus = await networkDiagnostic.checkApiAvailability("/api/realtime-db")
       setApiAvailable(apiStatus.available)
 
       if (!apiStatus.available) {
@@ -150,25 +164,17 @@ export default function GasRecolhimento() {
       // Criar objeto de estado
       const estado = { acumulado, rodada, historico }
 
-      // Adicionar à fila de sincronização
-      syncService.addToSyncQueue(estado)
+      // Enviar dados imediatamente
+      await realtimeSyncService.sendDataImmediate(estado)
 
-      // Processar fila
-      const success = await syncService.processQueue()
+      setUltimaSincronizacao(new Date().toISOString())
+      setStatusConexao("online")
+      setStatusSincronizacao("success")
+      console.log("Sincronização manual concluída com sucesso")
 
-      if (success) {
-        setUltimaSincronizacao(new Date().toISOString())
-        setStatusConexao("online")
-        setStatusSincronizacao("success")
-        console.log("Sincronização manual concluída com sucesso")
-      } else {
-        setStatusConexao("local")
-        setStatusSincronizacao("error")
-        setError("Sincronização parcial. Alguns dados podem estar armazenados apenas localmente.")
-      }
-
-      // Atualizar número de operações pendentes
-      setPendingOperations(syncService.getPendingOperationsCount())
+      // Mostrar alerta de sincronização bem-sucedida
+      setAlertaSalvamento(true)
+      setTimeout(() => setAlertaSalvamento(false), 3000)
     } catch (error) {
       console.error("Erro na sincronização manual:", error)
       setStatusConexao("error")
@@ -186,100 +192,23 @@ export default function GasRecolhimento() {
     }
   }, [sincronizando, statusSincronizacao])
 
-  // Limpar fila de sincronização
-  const limparFilaSincronizacao = useCallback(() => {
-    if (!isBrowser) return
-
-    syncService.clearSyncQueue()
-    setPendingOperations(0)
-    setConfirmarLimparFila(false)
-    setStatusSincronizacao("idle")
-    setError(null)
-  }, [])
-
-  // Configurar salvamento automático periódico
-  useEffect(() => {
-    if (!isBrowser || !salvamentoAutomatico) return
-
-    // Salvar a cada 5 minutos
-    const interval = setInterval(
-      () => {
-        if (navigator.onLine && !sincronizando && apiAvailable) {
-          console.log("Executando salvamento automático...")
-          sincronizarDados()
-            .then(() => {
-              console.log("Salvamento automático concluído")
-              // Mostrar alerta de salvamento bem-sucedido
-              setAlertaSalvamento(true)
-              setTimeout(() => setAlertaSalvamento(false), 3000)
-            })
-            .catch((err) => {
-              console.error("Erro no salvamento automático:", err)
-            })
-        }
-      },
-      5 * 60 * 1000,
-    ) // 5 minutos
-
-    return () => clearInterval(interval)
-  }, [salvamentoAutomatico, sincronizarDados, apiAvailable])
-
-  // Verificar periodicamente a fila de sincronização
-  useEffect(() => {
-    if (!isBrowser) return
-
-    const interval = setInterval(() => {
-      if (navigator.onLine && !sincronizando && syncService.hasPendingOperations() && apiAvailable) {
-        console.log("Verificando fila de sincronização...")
-        syncService
-          .processQueue()
-          .then((success) => {
-            if (success) {
-              setUltimaSincronizacao(new Date().toISOString())
-              setPendingOperations(0)
-            } else {
-              setPendingOperations(syncService.getPendingOperationsCount())
-            }
-          })
-          .catch((err) => {
-            console.error("Erro ao processar fila de sincronização:", err)
-          })
-      }
-    }, 30000) // Verificar a cada 30 segundos
-
-    return () => clearInterval(interval)
-  }, [sincronizando, apiAvailable])
-
   // Carregar dados iniciais
   const carregarDados = useCallback(async () => {
     setCarregando(true)
     setError(null)
 
     try {
-      // Carregar dados do serviço de armazenamento
-      const dados = await persistentStorageService.carregar()
+      // Tentar carregar dados do serviço em tempo real
+      const dados = await realtimeSyncService.fetchLatestData()
 
       if (dados && typeof dados.acumulado === "number" && Array.isArray(dados.historico)) {
         setAcumulado(dados.acumulado)
         setRodada(dados.rodada)
         setHistorico(dados.historico)
-
-        // Atualizar última sincronização
-        const lastSync = persistentStorageService.getLastSyncTime()
-        if (lastSync) {
-          setUltimaSincronizacao(lastSync)
-        } else {
-          setUltimaSincronizacao(new Date().toISOString())
-        }
-
+        setUltimaSincronizacao(new Date().toISOString())
         setStatusConexao(navigator.onLine ? "online" : "local")
       } else {
         throw new Error("Dados inválidos recebidos")
-      }
-
-      // Atualizar número de operações pendentes
-      if (isBrowser) {
-        setPendingOperations(syncService.getPendingOperationsCount())
       }
     } catch (error) {
       console.error("Erro ao carregar dados:", error)
@@ -300,36 +229,6 @@ export default function GasRecolhimento() {
   useEffect(() => {
     carregarDados()
   }, [carregarDados])
-
-  // Verificar periodicamente por mudanças no localStorage (para sincronização entre abas)
-  useEffect(() => {
-    if (!isBrowser) return
-
-    const checkLocalStorage = () => {
-      try {
-        const localData = persistentStorageService.loadFromLocalStorage()
-
-        // Se os dados locais forem diferentes dos atuais, atualizar
-        if (
-          localData.historico.length !== historico.length ||
-          localData.acumulado !== acumulado ||
-          localData.rodada !== rodada
-        ) {
-          console.log("Detectada mudança em outra aba, atualizando dados...")
-          setAcumulado(localData.acumulado)
-          setRodada(localData.rodada)
-          setHistorico(localData.historico)
-        }
-      } catch (error) {
-        console.error("Erro ao verificar localStorage:", error)
-      }
-    }
-
-    // Verificar a cada 10 segundos
-    const interval = setInterval(checkLocalStorage, 10000)
-
-    return () => clearInterval(interval)
-  }, [acumulado, rodada, historico])
 
   const validarEntrada = () => {
     if (!gasRetirado || isNaN(Number(gasRetirado)) || Number(gasRetirado) <= 0) {
@@ -373,11 +272,6 @@ export default function GasRecolhimento() {
         historico: [novaEntrada, ...historico],
       }
 
-      // Validar dados antes de salvar
-      if (!syncService.validateData(novoEstado)) {
-        throw new Error("Dados inválidos. Verifique os valores inseridos.")
-      }
-
       // Atualizar estado local
       setAcumulado(novoEstado.acumulado)
       setRodada(novoEstado.rodada)
@@ -387,13 +281,18 @@ export default function GasRecolhimento() {
       // Salvar dados localmente
       persistentStorageService.saveToLocalStorage(novoEstado)
 
-      // Adicionar à fila de sincronização
-      syncService.addToSyncQueue(novoEstado)
-      setPendingOperations(syncService.getPendingOperationsCount())
-
       // Tentar sincronizar imediatamente se online e API disponível
       if (navigator.onLine && apiAvailable) {
-        await sincronizarDados()
+        try {
+          // Enviar dados para sincronização em tempo real
+          await realtimeSyncService.sendDataImmediate(novoEstado)
+          setUltimaSincronizacao(new Date().toISOString())
+          setStatusConexao("online")
+        } catch (syncError) {
+          console.error("Erro ao sincronizar:", syncError)
+          setStatusConexao("local")
+          setError("Registro salvo localmente. Sincronização automática falhou.")
+        }
       } else {
         setStatusConexao("local")
         if (!navigator.onLine) {
@@ -436,11 +335,6 @@ export default function GasRecolhimento() {
         historico: [novaEntrada, ...historico],
       }
 
-      // Validar dados antes de salvar
-      if (!syncService.validateData(novoEstado)) {
-        throw new Error("Dados inválidos. Verifique os valores inseridos.")
-      }
-
       // Atualizar estado local
       setAcumulado(novoEstado.acumulado)
       setRodada(novoEstado.rodada)
@@ -449,13 +343,18 @@ export default function GasRecolhimento() {
       // Salvar dados localmente
       persistentStorageService.saveToLocalStorage(novoEstado)
 
-      // Adicionar à fila de sincronização
-      syncService.addToSyncQueue(novoEstado)
-      setPendingOperations(syncService.getPendingOperationsCount())
-
       // Tentar sincronizar imediatamente se online e API disponível
       if (navigator.onLine && apiAvailable) {
-        await sincronizarDados()
+        try {
+          // Enviar dados para sincronização em tempo real
+          await realtimeSyncService.sendDataImmediate(novoEstado)
+          setUltimaSincronizacao(new Date().toISOString())
+          setStatusConexao("online")
+        } catch (syncError) {
+          console.error("Erro ao sincronizar:", syncError)
+          setStatusConexao("local")
+          setError("Troca de cilindro registrada localmente. Sincronização automática falhou.")
+        }
       } else {
         setStatusConexao("local")
         if (!navigator.onLine) {
@@ -506,11 +405,6 @@ export default function GasRecolhimento() {
         historico: novoHistorico,
       }
 
-      // Validar dados antes de salvar
-      if (!syncService.validateData(novoEstado)) {
-        throw new Error("Dados inválidos após desfazer. Operação cancelada.")
-      }
-
       // Atualizar estado local
       setAcumulado(novoEstado.acumulado)
       setRodada(novoEstado.rodada)
@@ -519,13 +413,18 @@ export default function GasRecolhimento() {
       // Salvar dados localmente
       persistentStorageService.saveToLocalStorage(novoEstado)
 
-      // Adicionar à fila de sincronização
-      syncService.addToSyncQueue(novoEstado)
-      setPendingOperations(syncService.getPendingOperationsCount())
-
       // Tentar sincronizar imediatamente se online e API disponível
       if (navigator.onLine && apiAvailable) {
-        await sincronizarDados()
+        try {
+          // Enviar dados para sincronização em tempo real
+          await realtimeSyncService.sendDataImmediate(novoEstado)
+          setUltimaSincronizacao(new Date().toISOString())
+          setStatusConexao("online")
+        } catch (syncError) {
+          console.error("Erro ao sincronizar:", syncError)
+          setStatusConexao("local")
+          setError("Operação desfeita localmente. Sincronização automática falhou.")
+        }
       } else {
         setStatusConexao("local")
         if (!navigator.onLine) {
@@ -565,13 +464,20 @@ export default function GasRecolhimento() {
   const getStatusDisplay = () => {
     switch (statusConexao) {
       case "online":
-        return { text: "Online", bgColor: "bg-green-50", textColor: "text-green-700", dotColor: "bg-green-500" }
+        return {
+          text: "Online",
+          bgColor: "bg-green-50",
+          textColor: "text-green-700",
+          dotColor: "bg-green-500",
+          icon: <Wifi className="h-4 w-4 mr-2" />,
+        }
       case "offline":
         return {
           text: "Offline - Algumas funções podem estar limitadas",
           bgColor: "bg-amber-50",
           textColor: "text-amber-700",
           dotColor: "bg-amber-500",
+          icon: <WifiOff className="h-4 w-4 mr-2" />,
         }
       case "local":
         return {
@@ -579,6 +485,7 @@ export default function GasRecolhimento() {
           bgColor: "bg-blue-50",
           textColor: "text-blue-700",
           dotColor: "bg-blue-500",
+          icon: <Save className="h-4 w-4 mr-2" />,
         }
       case "error":
         return {
@@ -586,9 +493,16 @@ export default function GasRecolhimento() {
           bgColor: "bg-red-50",
           textColor: "text-red-700",
           dotColor: "bg-red-500",
+          icon: <AlertCircle className="h-4 w-4 mr-2" />,
         }
       default:
-        return { text: "Desconhecido", bgColor: "bg-gray-50", textColor: "text-gray-700", dotColor: "bg-gray-500" }
+        return {
+          text: "Desconhecido",
+          bgColor: "bg-gray-50",
+          textColor: "text-gray-700",
+          dotColor: "bg-gray-500",
+          icon: null,
+        }
     }
   }
 
@@ -654,7 +568,7 @@ export default function GasRecolhimento() {
       {alertaSalvamento && (
         <div className="bg-green-50 border border-green-200 text-green-700 px-4 py-3 rounded relative mb-4 flex items-center">
           <Save className="h-4 w-4 mr-2" />
-          Dados salvos automaticamente
+          Dados sincronizados com sucesso
           <button className="absolute top-0 bottom-0 right-0 px-4 py-3" onClick={() => setAlertaSalvamento(false)}>
             <span className="sr-only">Fechar</span>
             <span className="text-xl">&times;</span>
@@ -833,7 +747,7 @@ export default function GasRecolhimento() {
         <div
           className={`text-sm font-medium flex items-center justify-center p-2 rounded-md ${status.bgColor} ${status.textColor}`}
         >
-          <div className={`w-2 h-2 rounded-full mr-2 ${status.dotColor}`}></div>
+          {status.icon}
           {status.text}
           {statusConexao !== "offline" && (
             <Button
@@ -851,15 +765,6 @@ export default function GasRecolhimento() {
         <div className="text-xs text-center text-muted-foreground flex items-center justify-center mt-2">
           <Clock className="h-3 w-3 mr-1" />
           Última sincronização: {formatLastSync()}
-          {pendingOperations > 0 && (
-            <span className="ml-2 flex items-center">
-              <RefreshCw className="h-3 w-3 mr-1 animate-spin" />
-              {pendingOperations} operação(ões) pendente(s)
-              <Button variant="ghost" size="sm" className="ml-1 h-5 px-1" onClick={() => setConfirmarLimparFila(true)}>
-                <Trash2 className="h-3 w-3" />
-              </Button>
-            </span>
-          )}
         </div>
       </div>
 
@@ -948,27 +853,6 @@ export default function GasRecolhimento() {
               ) : (
                 "Confirmar"
               )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* Diálogo de confirmação para limpar fila de sincronização */}
-      <Dialog open={confirmarLimparFila} onOpenChange={setConfirmarLimparFila}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Limpar fila de sincronização</DialogTitle>
-            <DialogDescription>
-              Você está prestes a limpar a fila de sincronização com {pendingOperations} operação(ões) pendente(s). Esta
-              ação não pode ser desfeita e os dados não sincronizados serão perdidos.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmarLimparFila(false)}>
-              Cancelar
-            </Button>
-            <Button variant="destructive" onClick={limparFilaSincronizacao}>
-              Limpar Fila
             </Button>
           </DialogFooter>
         </DialogContent>
