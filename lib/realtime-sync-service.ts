@@ -134,6 +134,12 @@ export const realtimeSyncService = {
       const now = Date.now()
       this.lastSyncTime = now
 
+      // Sempre salvar no localStorage primeiro
+      if (typeof window !== "undefined") {
+        localStorage.setItem("gasRecolhimentoData", JSON.stringify(data))
+        localStorage.setItem("gasRecolhimentoLastSync", new Date().toISOString())
+      }
+
       // Preparar dados para envio
       const dataToSend = {
         ...data,
@@ -167,21 +173,10 @@ export const realtimeSyncService = {
       const result = await response.json()
       console.log("Dados enviados com sucesso:", result)
 
-      // Salvar no localStorage como backup
-      if (typeof window !== "undefined") {
-        localStorage.setItem("gasRecolhimentoData", JSON.stringify(data))
-        localStorage.setItem("gasRecolhimentoLastSync", new Date().toISOString())
-      }
-
       // Resetar contador de tentativas após sucesso
       this.retryCount = 0
     } catch (error) {
       console.error(`Erro ao enviar dados (tentativa ${retryAttempt + 1}/${MAX_RETRIES}):`, error)
-
-      // Salvar no localStorage como backup mesmo em caso de erro
-      if (typeof window !== "undefined") {
-        localStorage.setItem("gasRecolhimentoData", JSON.stringify(data))
-      }
 
       // Tentar novamente se não excedeu o número máximo de tentativas
       if (retryAttempt < MAX_RETRIES - 1) {

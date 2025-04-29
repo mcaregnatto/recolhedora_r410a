@@ -49,6 +49,7 @@ export default function GasRecolhimento() {
   const [alertaSalvamento, setAlertaSalvamento] = useState<boolean>(false)
   const [statusSincronizacao, setStatusSincronizacao] = useState<"idle" | "syncing" | "error" | "success">("idle")
   const [apiAvailable, setApiAvailable] = useState<boolean>(true)
+  const [modoOffline, setModoOffline] = useState<boolean>(false)
 
   // Referência para o estado atual para uso em temporizadores
   const stateRef = useRef({ acumulado, rodada, historico })
@@ -58,92 +59,26 @@ export default function GasRecolhimento() {
     stateRef.current = { acumulado, rodada, historico }
   }, [acumulado, rodada, historico])
 
-  // Verificar disponibilidade da API
-  const checkApiAvailability = useCallback(async () => {
-    if (!isBrowser) return
-
-    try {
-      const result = await networkDiagnostic.checkApiAvailability("/api/realtime-db")
-      setApiAvailable(result.available)
-
-      if (!result.available) {
-        setStatusConexao("error")
-        setError(`API indisponível: ${result.error}`)
-      } else {
-        setStatusConexao(navigator.onLine ? "online" : "offline")
+  // Carregar nome do operador do localStorage
+  useEffect(() => {
+    if (isBrowser) {
+      const savedOperador = localStorage.getItem("operadorNome")
+      if (savedOperador) {
+        setOperador(savedOperador)
       }
-    } catch (error) {
-      console.error("Erro ao verificar disponibilidade da API:", error)
     }
   }, [])
 
-  // Inicializar polling para atualizações em tempo real
+  // Salvar nome do operador no localStorage quando mudar
   useEffect(() => {
-    if (!isBrowser || !sincronizacaoAutomatica) return
-
-    // Função para atualizar dados quando receber atualizações
-    const handleDataUpdate = (data: EstadoAplicacao) => {
-      // Verificar se os dados são diferentes dos atuais
-      const currentState = stateRef.current
-
-      // Se os dados recebidos forem diferentes, atualizar o estado
-      if (
-        data.historico.length !== currentState.historico.length ||
-        data.acumulado !== currentState.acumulado ||
-        data.rodada !== currentState.rodada
-      ) {
-        console.log("Recebida atualização em tempo real")
-        setAcumulado(data.acumulado)
-        setRodada(data.rodada)
-        setHistorico(data.historico)
-        setUltimaSincronizacao(new Date().toISOString())
-
-        // Mostrar alerta de atualização
-        setAlertaSalvamento(true)
-        setTimeout(() => setAlertaSalvamento(false), 3000)
-      }
+    if (isBrowser && operador) {
+      localStorage.setItem("operadorNome", operador)
     }
-
-    // Iniciar polling
-    realtimeSyncService.startPolling(handleDataUpdate)
-
-    // Limpar ao desmontar
-    return () => {
-      realtimeSyncService.stopPolling()
-    }
-  }, [sincronizacaoAutomatica])
-
-  // Monitorar status de conexão
-  useEffect(() => {
-    if (!isBrowser) return
-
-    const handleOnline = () => {
-      setStatusConexao("online")
-      checkApiAvailability().then(() => {
-        if (apiAvailable) {
-          sincronizarDados()
-        }
-      })
-    }
-    const handleOffline = () => setStatusConexao("offline")
-
-    window.addEventListener("online", handleOnline)
-    window.addEventListener("offline", handleOffline)
-    setStatusConexao(navigator.onLine ? "online" : "offline")
-
-    // Verificar disponibilidade da API periodicamente
-    const apiCheckInterval = setInterval(checkApiAvailability, 30000) // A cada 30 segundos
-
-    return () => {
-      window.removeEventListener("online", handleOnline)
-      window.removeEventListener("offline", handleOffline)
-      clearInterval(apiCheckInterval)
-    }
-  }, [checkApiAvailability, apiAvailable])
+  }, [operador])
 
   // Sincronizar dados com o servidor
   const sincronizarDados = useCallback(async () => {
-    if (!isBrowser || !navigator.onLine || sincronizando) return
+    if (!isBrowser || !navigator.onLine || sincronizando || modoOffline) return
 
     setSincronizando(true)
     setStatusSincronizacao("syncing")
@@ -194,7 +129,106 @@ export default function GasRecolhimento() {
         }, 3000)
       }
     }
-  }, [sincronizando, statusSincronizacao])
+  }, [sincronizando, statusSincronizacao, modoOffline])
+
+  // Verificar disponibilidade da API
+  const checkApiAvailability = useCallback(async () => {
+    if (!isBrowser || modoOffline) return
+
+    try {
+      const result = await networkDiagnostic.checkApiAvailability("/api/realtime-db")
+      setApiAvailable(result.available)
+
+      if (!result.available) {
+        setStatusConexao("error")
+        setError(`API indisponível: ${result.error}`)
+      } else {
+        setStatusConexao(navigator.onLine ? "online" : "offline")
+      }
+    } catch (error) {
+      console.error("Erro ao verificar disponibilidade da API:", error)
+      setApiAvailable(false)
+      setStatusConexao("error")
+    }
+  }, [modoOffline])
+
+  // Inicializar polling para atualizações em tempo real
+  useEffect(() => {
+    if (!isBrowser || !sincronizacaoAutomatica || modoOffline) return
+
+    // Função para atualizar dados quando receber atualizações
+    const handleDataUpdate = (data: EstadoAplicacao) => {
+      // Verificar se os dados são diferentes dos atuais
+      const currentState = stateRef.current
+
+      // Se os dados recebidos forem diferentes, atualizar o estado
+      if (
+        data.historico.length !== currentState.historico.length ||
+        data.acumulado !== currentState.acumulado ||
+        data.rodada !== currentState.rodada
+      ) {
+        console.log("Recebida atualização em tempo real")
+        setAcumulado(data.acumulado)
+        setRodada(data.rodada)
+        setHistorico(data.historico)
+        setUltimaSincronizacao(new Date().toISOString())
+
+        // Mostrar alerta de atualização
+        setAlertaSalvamento(true)
+        setTimeout(() => setAlertaSalvamento(false), 3000)
+      }
+    }
+
+    // Iniciar polling
+    realtimeSyncService.startPolling(handleDataUpdate)
+
+    // Limpar ao desmontar
+    return () => {
+      realtimeSyncService.stopPolling()
+    }
+  }, [sincronizacaoAutomatica, modoOffline])
+
+  // Monitorar status de conexão
+  useEffect(() => {
+    if (!isBrowser) return
+
+    const handleOnline = () => {
+      if (!modoOffline) {
+        setStatusConexao("online")
+        checkApiAvailability().then(() => {
+          if (apiAvailable) {
+            sincronizarDados()
+          }
+        })
+      }
+    }
+
+    const handleOffline = () => {
+      if (!modoOffline) {
+        setStatusConexao("offline")
+      }
+    }
+
+    window.addEventListener("online", handleOnline)
+    window.addEventListener("offline", handleOffline)
+
+    if (!modoOffline) {
+      setStatusConexao(navigator.onLine ? "online" : "offline")
+    }
+
+    // Verificar disponibilidade da API periodicamente
+    let apiCheckInterval: NodeJS.Timeout | null = null
+
+    if (!modoOffline) {
+      apiCheckInterval = setInterval(checkApiAvailability, 30000) // A cada 30 segundos
+    }
+
+    return () => {
+      window.removeEventListener("online", handleOnline)
+      window.removeEventListener("offline", handleOffline)
+      if (apiCheckInterval) clearInterval(apiCheckInterval)
+    }
+  }, [checkApiAvailability, apiAvailable, sincronizarDados, modoOffline])
 
   // Carregar dados iniciais
   const carregarDados = useCallback(async () => {
@@ -202,6 +236,17 @@ export default function GasRecolhimento() {
     setError(null)
 
     try {
+      // Se estiver em modo offline, carregar apenas do localStorage
+      if (modoOffline) {
+        const localData = persistentStorageService.loadFromLocalStorage()
+        setAcumulado(localData.acumulado)
+        setRodada(localData.rodada)
+        setHistorico(localData.historico)
+        setStatusConexao("local")
+        setCarregando(false)
+        return
+      }
+
       // Tentar carregar dados do serviço em tempo real
       const dados = await realtimeSyncService.fetchLatestData()
 
@@ -227,12 +272,42 @@ export default function GasRecolhimento() {
     } finally {
       setCarregando(false)
     }
-  }, [])
+  }, [modoOffline])
 
   // Carregar dados ao iniciar
   useEffect(() => {
     carregarDados()
   }, [carregarDados])
+
+  // Alternar modo offline
+  const toggleModoOffline = useCallback(() => {
+    const novoModo = !modoOffline
+    setModoOffline(novoModo)
+
+    if (novoModo) {
+      // Entrando no modo offline
+      setStatusConexao("local")
+      realtimeSyncService.stopPolling()
+    } else {
+      // Saindo do modo offline
+      setStatusConexao(navigator.onLine ? "online" : "offline")
+      carregarDados()
+    }
+
+    // Salvar preferência no localStorage
+    localStorage.setItem("modoOffline", novoModo ? "true" : "false")
+  }, [modoOffline, carregarDados])
+
+  // Carregar preferência de modo offline
+  useEffect(() => {
+    if (isBrowser) {
+      const savedMode = localStorage.getItem("modoOffline") === "true"
+      setModoOffline(savedMode)
+      if (savedMode) {
+        setStatusConexao("local")
+      }
+    }
+  }, [])
 
   const validarEntrada = () => {
     if (!gasRetirado || isNaN(Number(gasRetirado)) || Number(gasRetirado) <= 0) {
@@ -285,8 +360,8 @@ export default function GasRecolhimento() {
       // Salvar dados localmente
       persistentStorageService.saveToLocalStorage(novoEstado)
 
-      // Tentar sincronizar imediatamente se online e API disponível
-      if (navigator.onLine && apiAvailable) {
+      // Tentar sincronizar imediatamente se online, API disponível e não estiver em modo offline
+      if (navigator.onLine && apiAvailable && !modoOffline) {
         try {
           // Enviar dados para sincronização em tempo real
           await realtimeSyncService.sendDataImmediate(novoEstado)
@@ -299,7 +374,9 @@ export default function GasRecolhimento() {
         }
       } else {
         setStatusConexao("local")
-        if (!navigator.onLine) {
+        if (modoOffline) {
+          // Não mostrar erro em modo offline, é comportamento esperado
+        } else if (!navigator.onLine) {
           setError("Dispositivo offline. Registro salvo localmente. Sincronize quando possível.")
         } else if (!apiAvailable) {
           setError("API indisponível. Registro salvo localmente. Sincronize quando possível.")
@@ -347,8 +424,8 @@ export default function GasRecolhimento() {
       // Salvar dados localmente
       persistentStorageService.saveToLocalStorage(novoEstado)
 
-      // Tentar sincronizar imediatamente se online e API disponível
-      if (navigator.onLine && apiAvailable) {
+      // Tentar sincronizar imediatamente se online, API disponível e não estiver em modo offline
+      if (navigator.onLine && apiAvailable && !modoOffline) {
         try {
           // Enviar dados para sincronização em tempo real
           await realtimeSyncService.sendDataImmediate(novoEstado)
@@ -361,7 +438,9 @@ export default function GasRecolhimento() {
         }
       } else {
         setStatusConexao("local")
-        if (!navigator.onLine) {
+        if (modoOffline) {
+          // Não mostrar erro em modo offline, é comportamento esperado
+        } else if (!navigator.onLine) {
           setError("Dispositivo offline. Troca de cilindro registrada localmente. Sincronize quando possível.")
         } else if (!apiAvailable) {
           setError("API indisponível. Troca de cilindro registrada localmente. Sincronize quando possível.")
@@ -417,8 +496,8 @@ export default function GasRecolhimento() {
       // Salvar dados localmente
       persistentStorageService.saveToLocalStorage(novoEstado)
 
-      // Tentar sincronizar imediatamente se online e API disponível
-      if (navigator.onLine && apiAvailable) {
+      // Tentar sincronizar imediatamente se online, API disponível e não estiver em modo offline
+      if (navigator.onLine && apiAvailable && !modoOffline) {
         try {
           // Enviar dados para sincronização em tempo real
           await realtimeSyncService.sendDataImmediate(novoEstado)
@@ -431,7 +510,9 @@ export default function GasRecolhimento() {
         }
       } else {
         setStatusConexao("local")
-        if (!navigator.onLine) {
+        if (modoOffline) {
+          // Não mostrar erro em modo offline, é comportamento esperado
+        } else if (!navigator.onLine) {
           setError("Dispositivo offline. Operação desfeita localmente. Sincronize quando possível.")
         } else if (!apiAvailable) {
           setError("API indisponível. Operação desfeita localmente. Sincronize quando possível.")
@@ -466,6 +547,16 @@ export default function GasRecolhimento() {
   }
 
   const getStatusDisplay = () => {
+    if (modoOffline) {
+      return {
+        text: "Modo Offline (Forçado) - Apenas armazenamento local",
+        bgColor: "bg-purple-50",
+        textColor: "text-purple-700",
+        dotColor: "bg-purple-500",
+        icon: <WifiOff className="h-4 w-4 mr-2" />,
+      }
+    }
+
     switch (statusConexao) {
       case "online":
         return {
@@ -511,6 +602,15 @@ export default function GasRecolhimento() {
   }
 
   const getSyncButtonState = () => {
+    if (modoOffline) {
+      return {
+        icon: <WifiOff className="h-3 w-3" />,
+        text: "Modo Offline",
+        disabled: true,
+        variant: "ghost" as const,
+      }
+    }
+
     switch (statusSincronizacao) {
       case "syncing":
         return {
@@ -579,6 +679,28 @@ export default function GasRecolhimento() {
           </button>
         </div>
       )}
+
+      {/* Botão de modo offline */}
+      <div className="flex justify-end">
+        <Button
+          variant={modoOffline ? "destructive" : "outline"}
+          size="sm"
+          onClick={toggleModoOffline}
+          className="text-xs"
+        >
+          {modoOffline ? (
+            <>
+              <Wifi className="h-3 w-3 mr-1" />
+              Desativar Modo Offline
+            </>
+          ) : (
+            <>
+              <WifiOff className="h-3 w-3 mr-1" />
+              Ativar Modo Offline
+            </>
+          )}
+        </Button>
+      </div>
 
       <Card>
         <CardHeader>
@@ -753,7 +875,7 @@ export default function GasRecolhimento() {
         >
           {status.icon}
           {status.text}
-          {statusConexao !== "offline" && (
+          {!modoOffline && statusConexao !== "offline" && (
             <Button
               variant={syncButtonState.variant}
               size="sm"
