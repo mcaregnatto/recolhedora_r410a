@@ -4,7 +4,7 @@ import path from "path"
 import fs from "fs"
 
 // Caminho para o arquivo de banco de dados
-const DB_FILE_PATH = path.join(process.cwd(), "data", "realtime-db.json")
+const DB_FILE_PATH = path.join(process.cwd(), "public", "realtime-db.json")
 
 // Garantir que o diretório exista
 const ensureDirectoryExists = () => {
@@ -75,26 +75,44 @@ export async function GET() {
 // Endpoint POST para escrever no arquivo
 export async function POST(request: Request) {
   try {
+    // Garantir que o diretório e arquivo existam
     await ensureFileExists()
 
     // Obter dados do corpo da requisição
     const newData = await request.json()
 
+    // Validar dados recebidos
+    if (!newData || typeof newData !== "object") {
+      return NextResponse.json({ success: false, message: "Dados inválidos" }, { status: 400 })
+    }
+
+    // Garantir que os campos obrigatórios existam
+    if (
+      typeof newData.acumulado !== "number" ||
+      typeof newData.rodada !== "number" ||
+      !Array.isArray(newData.historico)
+    ) {
+      return NextResponse.json({ success: false, message: "Formato de dados inválido" }, { status: 400 })
+    }
+
+    // Adicionar timestamp se não existir
+    if (!newData.timestamp) {
+      newData.timestamp = Date.now()
+    }
+
+    // Adicionar lastUpdated se não existir
+    if (!newData.lastUpdated) {
+      newData.lastUpdated = new Date().toISOString()
+    }
+
     // Ler dados atuais para comparação
-    let currentData = { timestamp: 0 }
+    let currentData = { timestamp: 0, historico: [] }
     try {
       const currentDataText = await readFile(DB_FILE_PATH, "utf8")
       currentData = JSON.parse(currentDataText)
     } catch (error) {
       console.error("Erro ao ler dados atuais:", error)
-    }
-
-    // Verificar se os dados novos são mais recentes
-    if (!newData.timestamp || newData.timestamp <= currentData.timestamp) {
-      return NextResponse.json({
-        success: false,
-        message: "Dados mais recentes já existem no servidor",
-      })
+      // Se não conseguir ler, vamos considerar que não há dados e continuar
     }
 
     // Converter para string formatada

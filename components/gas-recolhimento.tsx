@@ -179,7 +179,11 @@ export default function GasRecolhimento() {
       console.error("Erro na sincronização manual:", error)
       setStatusConexao("error")
       setStatusSincronizacao("error")
-      setError(`Erro ao sincronizar: ${error.message || "Desconhecido"}`)
+      setError(`Erro ao sincronizar: ${error.message || "Desconhecido"}. Tente novamente mais tarde.`)
+
+      // Salvar localmente mesmo em caso de erro
+      const { acumulado, rodada, historico } = stateRef.current
+      persistentStorageService.saveToLocalStorage({ acumulado, rodada, historico })
     } finally {
       setSincronizando(false)
 
