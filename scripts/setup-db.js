@@ -40,4 +40,17 @@ if (!fs.existsSync(LOG_FILE)) {
   fs.writeFileSync(LOG_FILE, `[${timestamp}] Sistema inicializado\n`, "utf8")
 }
 
+// Verificar permissões de escrita
+try {
+  const testFile = path.join(DATA_DIR, ".write-test")
+  fs.writeFileSync(testFile, "test")
+  fs.unlinkSync(testFile)
+  console.log("Permissões de escrita verificadas com sucesso!")
+} catch (error) {
+  console.error("ERRO: O diretório de dados não tem permissões de escrita!")
+  console.error("Por favor, verifique as permissões do diretório:", DATA_DIR)
+  console.error(error)
+  process.exit(1)
+}
+
 console.log("Configuração do banco de dados concluída!")

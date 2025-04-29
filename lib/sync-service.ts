@@ -1,4 +1,5 @@
 import type { EstadoAplicacao } from "./types"
+import { networkDiagnostic } from "./network-diagnostic"
 
 // Configuração
 const API_URL = "/api/storage"
@@ -20,6 +21,7 @@ interface SyncOperation {
   data: EstadoAplicacao
   attempts: number
   lastAttempt?: number
+  errors?: string[]
 }
 
 // Interface para estado de sincronização
@@ -29,6 +31,7 @@ interface SyncState {
   lastError: string | null
   currentOperationId: string | null
   syncStartTime: number | null
+  consecutiveFailures: number
 }
 
 // Serviço de sincronização com mecanismos robustos
@@ -63,6 +66,7 @@ export const syncService = {
         lastError: null,
         currentOperationId: null,
         syncStartTime: null,
+        consecutiveFailures: 0,
       }
     }
 
@@ -76,6 +80,7 @@ export const syncService = {
             lastError: null,
             currentOperationId: null,
             syncStartTime: null,
+            consecutiveFailures: 0,
           }
     } catch (error) {
       console.error("Erro ao ler estado de sincronização:", error)
@@ -85,6 +90,7 @@ export const syncService = {
         lastError: null,
         currentOperationId: null,
         syncStartTime: null,
+        consecutiveFailures: 0,
       }
     }
   },
@@ -113,6 +119,7 @@ export const syncService = {
         lastError: null,
         currentOperationId: null,
         syncStartTime: null,
+        consecutiveFailures: 0,
       }
       localStorage.setItem(SYNC_STATE_KEY, JSON.stringify(resetState))
       console.log("Estado de sincronização resetado")
@@ -126,6 +133,12 @@ export const syncService = {
     if (!isBrowser) return
 
     try {
+      // Validar dados antes de adicionar à fila
+      if (!this.validateData(data)) {
+        console.error("Dados inválidos, não adicionados à fila de sincronização")
+        throw new Error("Dados inválidos, não foi possível adicionar à fila de sincronização")
+      }
+
       const queue = this.getSyncQueue()
       const operationId = `op_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
 
@@ -134,8 +147,9 @@ export const syncService = {
         id: operationId,
         timestamp: Date.now(),
         operation: "save",
-        data: data,
+        data: this.sanitizeData(data),
         attempts: 0,
+        errors: [],
       })
 
       // Limitar tamanho da fila para evitar problemas de armazenamento
@@ -150,6 +164,56 @@ export const syncService = {
     } catch (error) {
       console.error("Erro ao adicionar à fila de sincronização:", error)
     }
+  },
+
+  // Validar dados antes de adicionar à fila
+  validateData(data: EstadoAplicacao): boolean {
+    // Verificar se os dados têm a estrutura correta
+    if (!data || typeof data !== "object") return false
+    if (typeof data.acumulado !== "number") return false
+    if (typeof data.rodada !== "number") return false
+    if (!Array.isArray(data.historico)) return false
+
+    // Verificar se o histórico contém entradas válidas
+    for (const entrada of data.historico) {
+      if (!entrada || typeof entrada !== "object") return false
+      if (!entrada.id) return false
+      if (typeof entrada.acumulado !== "number") return false
+      if (typeof entrada.rodada !== "number") return false
+      if (!entrada.data) return false
+
+      // Se não for troca de cilindro, quantidade deve ser um número positivo
+      if (!entrada.trocaCilindro && (typeof entrada.quantidade !== "number" || entrada.quantidade <= 0)) {
+        return false
+      }
+    }
+
+    return true
+  },
+
+  // Sanitizar dados antes de enviar
+  sanitizeData(data: EstadoAplicacao): EstadoAplicacao {
+    // Criar uma cópia profunda dos dados
+    const sanitized = JSON.parse(JSON.stringify(data))
+
+    // Garantir que todos os campos numéricos sejam números
+    sanitized.acumulado = Number(sanitized.acumulado)
+    sanitized.rodada = Number(sanitized.rodada)
+
+    // Sanitizar cada entrada do histórico
+    sanitized.historico = sanitized.historico.map((entrada: any) => {
+      return {
+        ...entrada,
+        acumulado: Number(entrada.acumulado),
+        rodada: Number(entrada.rodada),
+        quantidade: entrada.quantidade !== undefined ? Number(entrada.quantidade) : undefined,
+        valorFinalRodada: entrada.valorFinalRodada !== undefined ? Number(entrada.valorFinalRodada) : undefined,
+        trocaCilindro: Boolean(entrada.trocaCilindro),
+        operador: entrada.operador ? String(entrada.operador).trim() : "",
+      }
+    })
+
+    return sanitized
   },
 
   // Obter fila de sincronização
@@ -198,7 +262,20 @@ export const syncService = {
 
   // Processar fila de sincronização com timeout
   async processQueue(): Promise<boolean> {
-    if (!isBrowser || !navigator.onLine) return false
+    if (!isBrowser) return false
+
+    // Verificar conectividade antes de tentar sincronizar
+    if (!navigator.onLine) {
+      console.warn("Dispositivo offline, sincronização adiada")
+      return false
+    }
+
+    // Verificar disponibilidade da API
+    const apiStatus = await networkDiagnostic.checkApiAvailability()
+    if (!apiStatus.available) {
+      console.warn("API indisponível, sincronização adiada", apiStatus)
+      return false
+    }
 
     const syncState = this.getSyncState()
     if (syncState.inProgress) {
@@ -239,6 +316,7 @@ export const syncService = {
         this.updateSyncState({
           inProgress: false,
           lastError: "Timeout de sincronização",
+          consecutiveFailures: syncState.consecutiveFailures + 1,
         })
         resolve(false)
       }, SYNC_TIMEOUT)
@@ -254,6 +332,7 @@ export const syncService = {
       this.updateSyncState({
         inProgress: false,
         lastError: String(error),
+        consecutiveFailures: syncState.consecutiveFailures + 1,
       })
       return false
     }
@@ -304,6 +383,12 @@ export const syncService = {
         let operationSuccess = false
 
         if (operation.operation === "save") {
+          // Verificar novamente a conectividade antes de cada operação
+          if (!navigator.onLine) {
+            console.warn("Dispositivo offline durante processamento, adiando operação")
+            break
+          }
+
           operationSuccess = await this.syncToServer(operation.data)
         }
 
@@ -315,6 +400,8 @@ export const syncService = {
           // Incrementar contador de tentativas
           operation.attempts++
           operation.lastAttempt = Date.now()
+          if (!operation.errors) operation.errors = []
+          operation.errors.push(`Falha na tentativa ${operation.attempts} em ${new Date().toISOString()}`)
           this.updateSyncQueue(queue)
           success = false
         }
@@ -322,17 +409,21 @@ export const syncService = {
         console.error(`Erro ao processar operação ${operation.id}:`, error)
         operation.attempts++
         operation.lastAttempt = Date.now()
+        if (!operation.errors) operation.errors = []
+        operation.errors.push(`Erro na tentativa ${operation.attempts}: ${error.message || String(error)}`)
         this.updateSyncQueue(queue)
         success = false
       }
     }
 
     // Atualizar estado de sincronização
+    const syncState = this.getSyncState()
     this.updateSyncState({
       inProgress: false,
       lastSync: new Date().toISOString(),
       currentOperationId: null,
       syncStartTime: null,
+      consecutiveFailures: success ? 0 : syncState.consecutiveFailures + 1,
     })
 
     console.log(`Sincronização concluída. Processadas: ${processedCount}, Pendentes: ${queue.length - processedCount}`)
@@ -344,9 +435,33 @@ export const syncService = {
     try {
       console.log("Sincronizando dados com o servidor...")
 
+      // Verificar conectividade antes de tentar sincronizar
+      if (!navigator.onLine) {
+        console.warn("Dispositivo offline, não é possível sincronizar")
+        return false
+      }
+
+      // Verificar disponibilidade da API
+      const apiStatus = await networkDiagnostic.checkApiAvailability()
+      if (!apiStatus.available) {
+        console.warn("API indisponível, não é possível sincronizar", apiStatus)
+        return false
+      }
+
       // Adicionar timeout à requisição
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 segundos
+
+      // Preparar dados para envio
+      const sanitizedData = this.sanitizeData(data)
+      sanitizedData.lastUpdated = new Date().toISOString()
+
+      // Registrar tamanho dos dados para diagnóstico
+      const dataSize = JSON.stringify(sanitizedData).length
+      console.log("Enviando dados para o servidor", {
+        dataSize,
+        historico: sanitizedData.historico.length,
+      })
 
       const response = await fetch(API_URL, {
         method: "POST",
@@ -355,20 +470,24 @@ export const syncService = {
           "X-Client-ID": this.getClientId(),
           "X-Request-ID": `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
         },
-        body: JSON.stringify({
-          ...data,
-          lastUpdated: new Date().toISOString(),
-        }),
+        body: JSON.stringify(sanitizedData),
         signal: controller.signal,
       })
 
       clearTimeout(timeoutId)
 
       if (!response.ok) {
-        throw new Error(`Erro ao sincronizar dados: ${response.status}`)
+        const errorText = await response.text().catch(() => "Não foi possível ler o corpo da resposta")
+        console.error(`Erro ao sincronizar dados: ${response.status}`, {
+          status: response.status,
+          statusText: response.statusText,
+          errorText,
+        })
+        throw new Error(`Erro ao sincronizar dados: ${response.status} ${response.statusText}`)
       }
 
-      console.log("Dados sincronizados com sucesso com o servidor")
+      const responseData = await response.json()
+      console.log("Dados sincronizados com sucesso com o servidor", responseData)
       return true
     } catch (error) {
       if (error.name === "AbortError") {
@@ -398,7 +517,7 @@ export const syncService = {
 
     try {
       localStorage.setItem(SYNC_QUEUE_KEY, JSON.stringify([]))
-      console.log("Fila de sincronização limpa")
+      console.warn("Fila de sincronização limpa manualmente")
     } catch (error) {
       console.error("Erro ao limpar fila de sincronização:", error)
     }
@@ -428,5 +547,13 @@ export const syncService = {
       console.error("Erro ao obter contagem de operações pendentes:", error)
       return 0
     }
+  },
+
+  // Verificar se há problemas persistentes de sincronização
+  hasPersistentSyncIssues(): boolean {
+    if (!isBrowser) return false
+
+    const state = this.getSyncState()
+    return state.consecutiveFailures >= 3
   },
 }

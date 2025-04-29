@@ -1,6 +1,7 @@
 "use client"
 
 import type React from "react"
+
 import { useState, useEffect, useCallback, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -19,9 +20,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog"
-import { AlertTriangle, RotateCcw, RefreshCw, Loader2, Download, Clock, Save, AlertCircle, Trash2 } from "lucide-react"
+import { RotateCcw, RefreshCw, Loader2, Download, Clock, Save, AlertCircle, Trash2 } from "lucide-react"
 import { persistentStorageService } from "@/lib/persistent-storage-service"
 import { syncService } from "@/lib/sync-service"
+import { networkDiagnostic } from "@/lib/network-diagnostic"
 import type { EntradaGas } from "@/lib/types"
 
 // Verificar se estamos no navegador
@@ -38,7 +40,7 @@ export default function GasRecolhimento() {
   const [processando, setProcessando] = useState<boolean>(false)
   const [sincronizando, setSincronizando] = useState<boolean>(false)
   const [historicoAberto, setHistoricoAberto] = useState<boolean>(false)
-  const [statusConexao, setStatusConexao] = useState<"online" | "offline" | "local">("online")
+  const [statusConexao, setStatusConexao] = useState<"online" | "offline" | "local" | "error">("online")
   const [ultimaSincronizacao, setUltimaSincronizacao] = useState<string | null>(null)
   const [confirmarRegistro, setConfirmarRegistro] = useState<boolean>(false)
   const [confirmarTrocaCilindro, setConfirmarTrocaCilindro] = useState<boolean>(false)
@@ -48,6 +50,7 @@ export default function GasRecolhimento() {
   const [alertaSalvamento, setAlertaSalvamento] = useState<boolean>(false)
   const [confirmarLimparFila, setConfirmarLimparFila] = useState<boolean>(false)
   const [statusSincronizacao, setStatusSincronizacao] = useState<"idle" | "syncing" | "error" | "success">("idle")
+  const [apiAvailable, setApiAvailable] = useState<boolean>(true)
 
   // Referência para o estado atual para uso em temporizadores
   const stateRef = useRef({ acumulado, rodada, historico })
@@ -73,6 +76,26 @@ export default function GasRecolhimento() {
       } else if (syncState.lastError) {
         setStatusSincronizacao("error")
       }
+
+      // Verificar disponibilidade da API
+      checkApiAvailability()
+    }
+  }, [])
+
+  // Verificar disponibilidade da API
+  const checkApiAvailability = useCallback(async () => {
+    if (!isBrowser) return
+
+    try {
+      const result = await networkDiagnostic.checkApiAvailability()
+      setApiAvailable(result.available)
+
+      if (!result.available) {
+        setStatusConexao("error")
+        setError(`API indisponível: ${result.error}`)
+      }
+    } catch (error) {
+      console.error("Erro ao verificar disponibilidade da API:", error)
     }
   }, [])
 
@@ -82,7 +105,11 @@ export default function GasRecolhimento() {
 
     const handleOnline = () => {
       setStatusConexao("online")
-      sincronizarDados()
+      checkApiAvailability().then(() => {
+        if (apiAvailable) {
+          sincronizarDados()
+        }
+      })
     }
     const handleOffline = () => setStatusConexao("offline")
 
@@ -90,11 +117,15 @@ export default function GasRecolhimento() {
     window.addEventListener("offline", handleOffline)
     setStatusConexao(navigator.onLine ? "online" : "offline")
 
+    // Verificar disponibilidade da API periodicamente
+    const apiCheckInterval = setInterval(checkApiAvailability, 60000) // A cada minuto
+
     return () => {
       window.removeEventListener("online", handleOnline)
       window.removeEventListener("offline", handleOffline)
+      clearInterval(apiCheckInterval)
     }
-  }, [])
+  }, [checkApiAvailability, apiAvailable])
 
   // Sincronizar dados com o servidor
   const sincronizarDados = useCallback(async () => {
@@ -105,6 +136,14 @@ export default function GasRecolhimento() {
     setError(null)
 
     try {
+      // Verificar disponibilidade da API
+      const apiStatus = await networkDiagnostic.checkApiAvailability()
+      setApiAvailable(apiStatus.available)
+
+      if (!apiStatus.available) {
+        throw new Error(`API indisponível: ${apiStatus.error}`)
+      }
+
       // Obter dados atuais
       const { acumulado, rodada, historico } = stateRef.current
 
@@ -125,16 +164,16 @@ export default function GasRecolhimento() {
       } else {
         setStatusConexao("local")
         setStatusSincronizacao("error")
-        setError("Sincronização parcial. Alguns dados podem estar apenas localmente.")
+        setError("Sincronização parcial. Alguns dados podem estar armazenados apenas localmente.")
       }
 
       // Atualizar número de operações pendentes
       setPendingOperations(syncService.getPendingOperationsCount())
     } catch (error) {
       console.error("Erro na sincronização manual:", error)
-      setStatusConexao("local")
+      setStatusConexao("error")
       setStatusSincronizacao("error")
-      setError("Erro ao sincronizar. Dados salvos localmente.")
+      setError(`Erro ao sincronizar: ${error.message || "Desconhecido"}`)
     } finally {
       setSincronizando(false)
 
@@ -165,7 +204,7 @@ export default function GasRecolhimento() {
     // Salvar a cada 5 minutos
     const interval = setInterval(
       () => {
-        if (navigator.onLine && !sincronizando) {
+        if (navigator.onLine && !sincronizando && apiAvailable) {
           console.log("Executando salvamento automático...")
           sincronizarDados()
             .then(() => {
@@ -183,14 +222,14 @@ export default function GasRecolhimento() {
     ) // 5 minutos
 
     return () => clearInterval(interval)
-  }, [salvamentoAutomatico, sincronizarDados])
+  }, [salvamentoAutomatico, sincronizarDados, apiAvailable])
 
   // Verificar periodicamente a fila de sincronização
   useEffect(() => {
     if (!isBrowser) return
 
     const interval = setInterval(() => {
-      if (navigator.onLine && !sincronizando && syncService.hasPendingOperations()) {
+      if (navigator.onLine && !sincronizando && syncService.hasPendingOperations() && apiAvailable) {
         console.log("Verificando fila de sincronização...")
         syncService
           .processQueue()
@@ -209,7 +248,7 @@ export default function GasRecolhimento() {
     }, 30000) // Verificar a cada 30 segundos
 
     return () => clearInterval(interval)
-  }, [sincronizando])
+  }, [sincronizando, apiAvailable])
 
   // Carregar dados iniciais
   const carregarDados = useCallback(async () => {
@@ -334,6 +373,11 @@ export default function GasRecolhimento() {
         historico: [novaEntrada, ...historico],
       }
 
+      // Validar dados antes de salvar
+      if (!syncService.validateData(novoEstado)) {
+        throw new Error("Dados inválidos. Verifique os valores inseridos.")
+      }
+
       // Atualizar estado local
       setAcumulado(novoEstado.acumulado)
       setRodada(novoEstado.rodada)
@@ -347,16 +391,22 @@ export default function GasRecolhimento() {
       syncService.addToSyncQueue(novoEstado)
       setPendingOperations(syncService.getPendingOperationsCount())
 
-      // Tentar sincronizar imediatamente se online
-      if (navigator.onLine) {
-        sincronizarDados()
+      // Tentar sincronizar imediatamente se online e API disponível
+      if (navigator.onLine && apiAvailable) {
+        await sincronizarDados()
       } else {
         setStatusConexao("local")
-        setError("Registro salvo localmente. Sincronize quando possível.")
+        if (!navigator.onLine) {
+          setError("Dispositivo offline. Registro salvo localmente. Sincronize quando possível.")
+        } else if (!apiAvailable) {
+          setError("API indisponível. Registro salvo localmente. Sincronize quando possível.")
+        } else {
+          setError("Registro salvo localmente. Sincronize quando possível.")
+        }
       }
     } catch (error) {
       console.error("Erro ao registrar gás:", error)
-      setError("Erro ao registrar. Dados salvos localmente.")
+      setError(`Erro ao registrar: ${error.message || "Desconhecido"}. Dados salvos localmente.`)
       setStatusConexao("local")
     } finally {
       setProcessando(false)
@@ -386,6 +436,11 @@ export default function GasRecolhimento() {
         historico: [novaEntrada, ...historico],
       }
 
+      // Validar dados antes de salvar
+      if (!syncService.validateData(novoEstado)) {
+        throw new Error("Dados inválidos. Verifique os valores inseridos.")
+      }
+
       // Atualizar estado local
       setAcumulado(novoEstado.acumulado)
       setRodada(novoEstado.rodada)
@@ -398,16 +453,22 @@ export default function GasRecolhimento() {
       syncService.addToSyncQueue(novoEstado)
       setPendingOperations(syncService.getPendingOperationsCount())
 
-      // Tentar sincronizar imediatamente se online
-      if (navigator.onLine) {
-        sincronizarDados()
+      // Tentar sincronizar imediatamente se online e API disponível
+      if (navigator.onLine && apiAvailable) {
+        await sincronizarDados()
       } else {
         setStatusConexao("local")
-        setError("Troca de cilindro registrada localmente. Sincronize quando possível.")
+        if (!navigator.onLine) {
+          setError("Dispositivo offline. Troca de cilindro registrada localmente. Sincronize quando possível.")
+        } else if (!apiAvailable) {
+          setError("API indisponível. Troca de cilindro registrada localmente. Sincronize quando possível.")
+        } else {
+          setError("Troca de cilindro registrada localmente. Sincronize quando possível.")
+        }
       }
     } catch (error) {
       console.error("Erro ao trocar cilindro:", error)
-      setError("Erro ao trocar cilindro. Dados salvos localmente.")
+      setError(`Erro ao trocar cilindro: ${error.message || "Desconhecido"}. Dados salvos localmente.`)
       setStatusConexao("local")
     } finally {
       setProcessando(false)
@@ -445,6 +506,11 @@ export default function GasRecolhimento() {
         historico: novoHistorico,
       }
 
+      // Validar dados antes de salvar
+      if (!syncService.validateData(novoEstado)) {
+        throw new Error("Dados inválidos após desfazer. Operação cancelada.")
+      }
+
       // Atualizar estado local
       setAcumulado(novoEstado.acumulado)
       setRodada(novoEstado.rodada)
@@ -457,16 +523,22 @@ export default function GasRecolhimento() {
       syncService.addToSyncQueue(novoEstado)
       setPendingOperations(syncService.getPendingOperationsCount())
 
-      // Tentar sincronizar imediatamente se online
-      if (navigator.onLine) {
-        sincronizarDados()
+      // Tentar sincronizar imediatamente se online e API disponível
+      if (navigator.onLine && apiAvailable) {
+        await sincronizarDados()
       } else {
         setStatusConexao("local")
-        setError("Operação desfeita localmente. Sincronize quando possível.")
+        if (!navigator.onLine) {
+          setError("Dispositivo offline. Operação desfeita localmente. Sincronize quando possível.")
+        } else if (!apiAvailable) {
+          setError("API indisponível. Operação desfeita localmente. Sincronize quando possível.")
+        } else {
+          setError("Operação desfeita localmente. Sincronize quando possível.")
+        }
       }
     } catch (error) {
       console.error("Erro ao desfazer registro:", error)
-      setError("Não foi possível desfazer o último registro.")
+      setError(`Não foi possível desfazer o último registro: ${error.message || "Erro desconhecido"}`)
     } finally {
       setProcessando(false)
     }
@@ -507,6 +579,13 @@ export default function GasRecolhimento() {
           bgColor: "bg-blue-50",
           textColor: "text-blue-700",
           dotColor: "bg-blue-500",
+        }
+      case "error":
+        return {
+          text: "Erro de Conexão - API indisponível",
+          bgColor: "bg-red-50",
+          textColor: "text-red-700",
+          dotColor: "bg-red-500",
         }
       default:
         return { text: "Desconhecido", bgColor: "bg-gray-50", textColor: "text-gray-700", dotColor: "bg-gray-500" }
@@ -641,7 +720,12 @@ export default function GasRecolhimento() {
               </div>
             </div>
 
-            <IndicadorProgresso valor={acumulado} maximo={10000} subtitulo="Progresso: Limite de 10kg por rodada" />
+            <IndicadorProgresso
+              valor={acumulado}
+              maximo={10000}
+              titulo="Progresso"
+              subtitulo="Limite de 10kg por rodada"
+            />
 
             {cilindroAtingiuLimite && (
               <Button
@@ -779,6 +863,7 @@ export default function GasRecolhimento() {
         </div>
       </div>
 
+      {/* Diálogo de confirmação de registro */}
       <Dialog open={confirmarRegistro} onOpenChange={setConfirmarRegistro}>
         <DialogContent>
           <DialogHeader>
@@ -805,6 +890,7 @@ export default function GasRecolhimento() {
         </DialogContent>
       </Dialog>
 
+      {/* Diálogo de confirmação de desfazer */}
       <Dialog open={confirmarDesfazer} onOpenChange={setConfirmarDesfazer}>
         <DialogContent>
           <DialogHeader>
@@ -812,26 +898,12 @@ export default function GasRecolhimento() {
             <DialogDescription>
               {historico.length > 0 ? (
                 <>
-                  {historico[0].trocaCilindro ? (
-                    <span>
-                      Você está prestes a desfazer a troca de cilindro feita por{" "}
-                      {historico[0].operador || "operador não identificado"}.
-                    </span>
-                  ) : (
-                    <>
-                      Você está prestes a desfazer o registro de {historico[0].quantidade}g feito por{" "}
-                      {historico[0].operador || "operador não identificado"}.
-                      {historico[0].valorFinalRodada && (
-                        <div className="mt-2 flex items-center text-amber-600">
-                          <AlertTriangle className="h-4 w-4 mr-2" />
-                          <span>Este registro completou uma rodada. Desfazê-lo reverterá para a rodada anterior.</span>
-                        </div>
-                      )}
-                    </>
-                  )}
+                  Você está prestes a desfazer{" "}
+                  {historico[0].trocaCilindro ? "a troca de cilindro" : `o registro de ${historico[0].quantidade}g`}{" "}
+                  feito por {historico[0].operador || "operador não identificado"}.
                 </>
               ) : (
-                <span>Não há registros para desfazer.</span>
+                "Não há registros para desfazer."
               )}
             </DialogDescription>
           </DialogHeader>
@@ -839,34 +911,28 @@ export default function GasRecolhimento() {
             <Button variant="outline" onClick={() => setConfirmarDesfazer(false)} disabled={processando}>
               Cancelar
             </Button>
-            <Button
-              variant="destructive"
-              onClick={desfazerUltimoRegistro}
-              disabled={historico.length === 0 || processando}
-            >
+            <Button onClick={desfazerUltimoRegistro} disabled={processando || historico.length === 0}>
               {processando ? (
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   Processando...
                 </>
               ) : (
-                "Desfazer"
+                "Confirmar"
               )}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
+      {/* Diálogo de confirmação de troca de cilindro */}
       <Dialog open={confirmarTrocaCilindro} onOpenChange={setConfirmarTrocaCilindro}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Confirmar troca de cilindro</DialogTitle>
             <DialogDescription>
-              O cilindro realmente foi trocado?
-              <div className="mt-2 flex items-center text-amber-600">
-                <AlertTriangle className="h-4 w-4 mr-2" />
-                <span>Esta ação encerrará a rodada atual e iniciará uma nova com acumulado zero.</span>
-              </div>
+              Você está prestes a registrar uma troca de cilindro. O acumulado atual de {acumulado}g será registrado
+              como o valor final da rodada {rodada} e uma nova rodada será iniciada.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -880,23 +946,21 @@ export default function GasRecolhimento() {
                   Processando...
                 </>
               ) : (
-                "Confirmar Troca"
+                "Confirmar"
               )}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
+      {/* Diálogo de confirmação para limpar fila de sincronização */}
       <Dialog open={confirmarLimparFila} onOpenChange={setConfirmarLimparFila}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Limpar fila de sincronização</DialogTitle>
             <DialogDescription>
-              Você está prestes a limpar a fila de sincronização com {pendingOperations} operação(ões) pendente(s).
-              <div className="mt-2 flex items-center text-amber-600">
-                <AlertTriangle className="h-4 w-4 mr-2" />
-                <span>Esta ação não pode ser desfeita e os dados não sincronizados serão perdidos.</span>
-              </div>
+              Você está prestes a limpar a fila de sincronização com {pendingOperations} operação(ões) pendente(s). Esta
+              ação não pode ser desfeita e os dados não sincronizados serão perdidos.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
